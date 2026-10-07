@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class FastAPIClient:
     """Client for communicating with the Connect FastAPI server"""
 
-    _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+    _RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 
     def __init__(
         self,
@@ -156,10 +156,7 @@ class FastAPIClient:
         if data_date:
             params["data_date"] = data_date
 
-        if head_name:
-            path = f"/v1/metrics/heading/{head_name}"
-        else:
-            path = "/v1/metrics/heading"
+        path = f"/v1/metrics/heading/{head_name}" if head_name else "/v1/metrics/heading"
 
         return self._request_json(path, params=params)
 
@@ -259,9 +256,7 @@ class FastAPIClient:
             params["equip_type"] = equip_type
         return self._request_json("/v1/metrics/equipment/sold", params=params)
 
-    def get_equipment_stock(
-        self, equip_type: str | None = None, model: str | None = None
-    ) -> dict[str, Any] | None:
+    def get_equipment_stock(self, equip_type: str | None = None, model: str | None = None) -> dict[str, Any] | None:
         """Get finished equipment ready in stock by type/model/spec."""
         params: dict[str, Any] = {}
         if equip_type:
@@ -270,9 +265,7 @@ class FastAPIClient:
             params["model"] = model
         return self._request_json("/v1/metrics/equipment/stock", params=params)
 
-    def get_equipment_builds(
-        self, status: str | None = None, stage: str | None = None
-    ) -> dict[str, Any] | None:
+    def get_equipment_builds(self, status: str | None = None, stage: str | None = None) -> dict[str, Any] | None:
         """Get open equipment build requests with stage, completion % and owed items."""
         params: dict[str, Any] = {}
         if status:
@@ -281,9 +274,7 @@ class FastAPIClient:
             params["stage"] = stage
         return self._request_json("/v1/metrics/equipment/builds", params=params)
 
-    def get_equipment_parts(
-        self, low_only: bool = True, limit: int = 50
-    ) -> dict[str, Any] | None:
+    def get_equipment_parts(self, low_only: bool = True, limit: int = 50) -> dict[str, Any] | None:
         """Get equipment BOM parts stock vs minimum (low-stock list by default)."""
         params: dict[str, Any] = {"low_only": low_only, "limit": limit}
         return self._request_json("/v1/metrics/equipment/parts", params=params)

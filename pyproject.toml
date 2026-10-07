@@ -1,0 +1,30 @@
+# Tool configuration only — connectBot is not a package. The Node backend runs
+# it as `venv\Scripts\python.exe main.py`; runtime deps live in requirements.txt.
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+extend-exclude = ["venv", "logs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP", "SIM", "RUF"]
+# E501: the formatter owns line length; long string literals are left alone.
+# RUF001: curly quotes/dashes in Slack reply text are deliberate typography.
+ignore = ["E501", "RUF001"]
+
+[tool.ruff.lint.per-file-ignores]
+# load_dotenv() must run before the app modules read os.environ.
+"main.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src/connectbot", "main.py"]
+explicit_package_bases = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[tool.pytest.ini_options]
+# Root test_setup.py has network-calling test_* functions — never collect it.
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q --ignore=test_setup.py"

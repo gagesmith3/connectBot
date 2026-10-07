@@ -21,7 +21,7 @@ Your job is to plan, trace, and implement changes that span all three projects c
 
 1. **Locate the source** — search connectCompute `jobs/` and the coverage matrices (`CURRENT_COVERAGE_MATRIX.md`, `TABLE_DOMAIN_MATRIX.md`) to confirm the metric exists or identify the gap.
 2. **Trace the API contract** — check connectFastAPI `routers/` and `schemas/` to see if an endpoint already exposes the data.
-3. **Trace the bot handler** — check connectBot `handlers.py`, `intent_parser.py`, and `api_client.py` to see how the bot currently queries and formats this data.
+3. **Trace the bot handler** — check connectBot `keyword_router.py`, `tool_router.py`, `orchestrator.py` (`_call_api`), and `api_client.py` to see how the bot currently routes, queries, and formats this data. Follow `.claude/skills/connectbot/SKILL.md` to wire a new endpoint (tests first).
 4. **Plan before editing** — use the todo list to lay out each change per layer before writing code.
 5. **Implement layer by layer** — compute job first, then API router/schema, then bot handler. Keep changes minimal and scoped.
 
@@ -31,7 +31,7 @@ Your job is to plan, trace, and implement changes that span all three projects c
 |-------|-----------|
 | connectCompute | `src/connectcompute/jobs/`, `CURRENT_COVERAGE_MATRIX.md`, `TABLE_DOMAIN_MATRIX.md` |
 | connectFastAPI | `src/connectfastapi/routers/`, `src/connectfastapi/schemas/` |
-| connectBot | `src/connectbot/handlers.py`, `src/connectbot/api_client.py`, `src/connectbot/intent_parser.py`, `src/connectbot/response_formatter.py` |
+| connectBot | `src/connectbot/keyword_router.py`, `src/connectbot/tool_router.py`, `src/connectbot/orchestrator.py`, `src/connectbot/api_client.py`, `src/connectbot/response_formatter.py` (`API_CATALOG`), `tests/` |
 
 ## Output Format
 - List changes needed per layer before making edits.

@@ -97,7 +97,7 @@ class BotSettings:
     @classmethod
     def from_env(cls) -> BotSettings:
         """Load settings from environment variables"""
-        
+
         # Required settings
         slack_bot_token = os.getenv("SLACK_BOT_TOKEN")
         if not slack_bot_token:
@@ -141,11 +141,7 @@ class BotSettings:
         openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
         openrouter_models_raw = os.getenv("OPENROUTER_MODELS", "")
         openrouter_model = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
-        openrouter_models = [
-            model.strip()
-            for model in openrouter_models_raw.split(",")
-            if model.strip()
-        ]
+        openrouter_models = [model.strip() for model in openrouter_models_raw.split(",") if model.strip()]
         if not openrouter_models:
             openrouter_models = [openrouter_model]
         openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
@@ -156,18 +152,17 @@ class BotSettings:
         ollama_model = os.getenv("OLLAMA_MODEL", "gemma3:4b")
         bot_identity_name = os.getenv("BOT_IDENTITY_NAME", "ConnectBot").strip() or "ConnectBot"
         bot_scope_name = os.getenv("BOT_SCOPE_NAME", "IWT / Connect operations").strip() or "IWT / Connect operations"
-        bot_voice_style = os.getenv(
-            "BOT_VOICE_STYLE",
-            "concise, practical, direct, and shop-floor friendly",
-        ).strip() or "concise, practical, direct, and shop-floor friendly"
+        bot_voice_style = (
+            os.getenv(
+                "BOT_VOICE_STYLE",
+                "concise, practical, direct, and shop-floor friendly",
+            ).strip()
+            or "concise, practical, direct, and shop-floor friendly"
+        )
         bot_personality_notes = os.getenv("BOT_PERSONALITY_NOTES", "").strip()
         social_deterministic_mode = os.getenv("SOCIAL_DETERMINISTIC_MODE", "true").lower() == "true"
         use_tool_router = os.getenv("USE_TOOL_ROUTER", "true").lower() == "true"
-        sales_access_users = {
-            user.strip()
-            for user in os.getenv("SALES_ACCESS_USERS", "").split(",")
-            if user.strip()
-        }
+        sales_access_users = {user.strip() for user in os.getenv("SALES_ACCESS_USERS", "").split(",") if user.strip()}
         llm_timeout_seconds = float(os.getenv("LLM_TIMEOUT_SECONDS", "20"))
         local_only_fail_closed = os.getenv("LOCAL_ONLY_FAIL_CLOSED", "false").lower() == "true"
         use_agent_mode = os.getenv("USE_AGENT_MODE", "true").lower() == "true"
@@ -180,9 +175,7 @@ class BotSettings:
         ssl_key_file = os.getenv("SSL_KEY_FILE")
 
         if use_socket_mode and not slack_app_token:
-            raise ValueError(
-                "SLACK_APP_TOKEN is required when USE_SOCKET_MODE=true"
-            )
+            raise ValueError("SLACK_APP_TOKEN is required when USE_SOCKET_MODE=true")
 
         return cls(
             slack_bot_token=slack_bot_token,

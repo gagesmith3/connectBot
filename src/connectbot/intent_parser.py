@@ -11,6 +11,7 @@ from typing import Any
 
 from .llm_client import LLMClient
 from .openrouter_client import OpenRouterClient
+from .response_formatter import capability_summary
 
 logger = logging.getLogger(__name__)
 
@@ -78,46 +79,50 @@ If the query is ambiguous but business-related, default to backlog.
 If a query cannot be answered with available endpoints, respond with:
 {"endpoint": null, "parameters": {}, "reasoning": "Cannot process this query with available endpoints"}"""
 
-    _SMALL_TALK_KEYWORDS = {
-        "hello",
-        "hi",
-        "hey",
-        "thanks",
-        "thank",
-        "morning",
-        "afternoon",
-        "evening",
-        "how are you",
-        "what can you do",
-        "who are you",
-        "joke",
-        "help",
-    }
+    _SMALL_TALK_KEYWORDS = frozenset(
+        {
+            "hello",
+            "hi",
+            "hey",
+            "thanks",
+            "thank",
+            "morning",
+            "afternoon",
+            "evening",
+            "how are you",
+            "what can you do",
+            "who are you",
+            "joke",
+            "help",
+        }
+    )
 
-    _SUPPORTED_ENDPOINTS = {
-        "backlog",
-        "backlog_breakdown",
-        "backlog_lots",
-        "heading",
-        "heading_overall",
-        "heading_summary",
-        "livewire_demand",
-        "livewire_inventory",
-        "livewire_usage",
-        "sales",
-        "sage_trend",
-        "equipment_sold",
-        "equipment_stock",
-        "equipment_builds",
-        "equipment_parts",
-        "equipment_repairs",
-        "equipment_repairs_history",
-        "compute_runs",
-        "fastapi_healthcheck",
-        "retired",
-        "help",
-        "chat",
-    }
+    _SUPPORTED_ENDPOINTS = frozenset(
+        {
+            "backlog",
+            "backlog_breakdown",
+            "backlog_lots",
+            "heading",
+            "heading_overall",
+            "heading_summary",
+            "livewire_demand",
+            "livewire_inventory",
+            "livewire_usage",
+            "sales",
+            "sage_trend",
+            "equipment_sold",
+            "equipment_stock",
+            "equipment_builds",
+            "equipment_parts",
+            "equipment_repairs",
+            "equipment_repairs_history",
+            "compute_runs",
+            "fastapi_healthcheck",
+            "retired",
+            "help",
+            "chat",
+        }
+    )
 
     def _score_intent(self, query: str, endpoint: str | None, params: dict[str, Any]) -> float:
         normalized = query.strip().lower()
@@ -240,12 +245,19 @@ If a query cannot be answered with available endpoints, respond with:
     def _fallback_parse(self, query: str) -> dict[str, Any]:
         normalized = " ".join(query.strip().lower().split())
 
-        if (
-            ("connectfastapi" in normalized or "connect fastapi" in normalized or "fastapi" in normalized)
-            and any(
-                token in normalized
-                for token in {"connected", "connection", "online", "up", "down", "available", "health", "status", "reachable"}
-            )
+        if ("connectfastapi" in normalized or "connect fastapi" in normalized or "fastapi" in normalized) and any(
+            token in normalized
+            for token in {
+                "connected",
+                "connection",
+                "online",
+                "up",
+                "down",
+                "available",
+                "health",
+                "status",
+                "reachable",
+            }
         ):
             return {
                 "endpoint": "fastapi_healthcheck",
@@ -273,7 +285,7 @@ If a query cannot be answered with available endpoints, respond with:
             return {
                 "endpoint": "chat",
                 "parameters": {
-                    "message": "You can ask me for backlog, heading metrics, wire inventory, wire usage, or wire demand. If live data is down, I’ll tell you that directly."
+                    "message": f"You can ask me for {capability_summary()}. If live data is down, I’ll tell you that directly."
                 },
                 "reasoning": "Basic conversational acknowledgement handled locally",
             }
@@ -344,9 +356,20 @@ If a query cannot be answered with available endpoints, respond with:
             # Per-head rows only when a specific head or a breakdown is requested;
             # general heading status questions get the overall plan-vs-actual rollup.
             breakdown_terms = (
-                "by head", "per head", "each head", "which head", "every head",
-                "by header", "per header", "each header", "which header",
-                "breakdown", "break down", "all heads", "all headers", "individual",
+                "by head",
+                "per head",
+                "each head",
+                "which head",
+                "every head",
+                "by header",
+                "per header",
+                "each header",
+                "which header",
+                "breakdown",
+                "break down",
+                "all heads",
+                "all headers",
+                "individual",
             )
             head_match = re.search(
                 r"\b(carlo[\s_-]*salvi|salvi|feng[\s_-]*pei[\s_-]*[123]?|national[\s_-]*[123]?|sp[\s_-]*11|sp[\s_-]*21[\s_-]*[12]?)\b",
@@ -368,7 +391,7 @@ If a query cannot be answered with available endpoints, respond with:
             }
 
         if "inventory" in normalized or "in stock" in normalized or "on hand" in normalized or "spool" in normalized:
-            parameters: dict[str, Any] = {}
+            parameters = {}
             for loc in ("shed", "head", "farm"):
                 if loc in normalized:
                     parameters["location"] = loc.upper()
@@ -380,7 +403,7 @@ If a query cannot be answered with available endpoints, respond with:
             }
 
         if any(kw in normalized for kw in ("usage", "consumption", "consumed")):
-            parameters: dict[str, Any] = {}
+            parameters = {}
             if "vendor" in normalized:
                 parameters["dimension"] = "vendor"
             elif "dia" in normalized or "diameter" in normalized:
@@ -402,14 +425,14 @@ If a query cannot be answered with available endpoints, respond with:
             or "aluminum" in normalized
             or "aluminium" in normalized
             or "stainless" in normalized
-            or re.search(r'\b[0-9]{3,4}-[a-zA-Z]{1,3}\b', normalized)
+            or re.search(r"\b[0-9]{3,4}-[a-zA-Z]{1,3}\b", normalized)
             or ("material" in normalized and "order" in normalized)
         ):
             material_query = None
             # Explicit full code: 1010-MS, 302-SS, 5356-AL
-            code_match = re.search(r'\b([0-9]{3,4}-[a-zA-Z]{1,3})\b', normalized)
+            code_match = re.search(r"\b([0-9]{3,4}-[a-zA-Z]{1,3})\b", normalized)
             # Bare number: "302", "1010", "5356"
-            number_match = re.search(r'\b([0-9]{3,4})\b', normalized)
+            number_match = re.search(r"\b([0-9]{3,4})\b", normalized)
 
             if code_match:
                 material_query = code_match.group(1).upper()
@@ -424,7 +447,7 @@ If a query cannot be answered with available endpoints, respond with:
             elif "steel" in normalized:
                 material_query = "steel"
 
-            parameters: dict[str, Any] = {}
+            parameters = {}
             if material_query:
                 parameters["material_query"] = material_query
             if "shortage" in normalized:
@@ -485,12 +508,19 @@ If a query cannot be answered with available endpoints, respond with:
         if any(keyword in normalized for keyword in self._SMALL_TALK_KEYWORDS):
             return self._fallback_parse(query)
 
-        if (
-            ("connectfastapi" in normalized or "connect fastapi" in normalized or "fastapi" in normalized)
-            and any(
-                token in normalized
-                for token in {"connected", "connection", "online", "up", "down", "available", "health", "status", "reachable"}
-            )
+        if ("connectfastapi" in normalized or "connect fastapi" in normalized or "fastapi" in normalized) and any(
+            token in normalized
+            for token in {
+                "connected",
+                "connection",
+                "online",
+                "up",
+                "down",
+                "available",
+                "health",
+                "status",
+                "reachable",
+            }
         ):
             return self._fallback_parse(query)
 
@@ -518,31 +548,29 @@ If a query cannot be answered with available endpoints, respond with:
                 return enriched
 
             content = self._create_completion(query)
-            
+
             # Remove markdown code blocks if present
             if content.startswith("```"):
                 content = content.split("```")[1]
                 if content.startswith("json"):
                     content = content[4:]
                 content = content.strip()
-            
+
             result = json.loads(content)
             enriched = self._enrich_intent(query, result)
-            
+
             logger.info(
                 f"Parsed query '{query}' -> endpoint: {enriched.get('endpoint')}, "
                 f"params: {enriched.get('parameters')}, confidence: {enriched.get('confidence')}"
             )
-            
+
             return enriched
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse LLM response as JSON: {e}")
-            return self._enrich_intent(query, {
-                "endpoint": None,
-                "parameters": {},
-                "reasoning": f"Error parsing response: {e}"
-            })
+            return self._enrich_intent(
+                query, {"endpoint": None, "parameters": {}, "reasoning": f"Error parsing response: {e}"}
+            )
         except Exception as e:
             logger.error(f"Error parsing intent: {e}")
             return self._enrich_intent(query, self._fallback_parse(query))

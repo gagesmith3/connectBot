@@ -17,22 +17,29 @@ upstream (`/compute-api` skill in htdocs). The bot never estimates numbers.
 Pick one snake_case **endpoint name** (e.g. `equipment_serial`) and use it
 in every step below. All the steps key on that one name.
 
+- [ ] **First, write the failing tests** (TDD): routing rows in
+      `tests/test_keyword_routing.py` (the new phrasings *and* a nearby phrasing that
+      must not match), plus a flow test in `tests/test_orchestrator_flow.py` using
+      `fake_api.routes["/v1/metrics/..."] = {...}`.
 - [ ] `api_client.py`: `get_<thing>()` calling `self._request_json("/v1/metrics/...", params=...)`;
-      drop `None` params.
+      drop `None` params. **GET only.** `test_api_client_readonly.py` picks up every
+      `get_*` automatically (see CLAUDE.md "Data sources").
 - [ ] `orchestrator.py` `_call_api`: `if endpoint == "<name>": return self.fastapi_client.get_<thing>(...)`.
 - [ ] `tool_router.py` `TOOL_DEFS`: add a tool with that name. The description should
       say when to use it **and when not to** (point to the neighbouring tool).
       Use enums for closed value sets.
-- [ ] `orchestrator.py` `_resolve_keyword_intent`: add a deterministic rule only
+- [ ] `keyword_router.py` `resolve_keyword_intent`: add a deterministic rule only
       if the phrasing is unambiguous. Mind the order: equipment rules come before sales, and
       retired topics come before backlog/heading. Return `None` for drill-down phrasing so
       the tool router picks the parameters.
-- [ ] `_BUSINESS_KEYWORDS` / `_TOPIC_GROUPS` if the new domain's nouns aren't covered.
-- [ ] `_trim_evidence` if responses can be large (>80 rows, or rows need a non-default order).
-- [ ] Dollar figures? Add to `_SALES_ENDPOINTS` so the per-user gate applies.
-- [ ] `response_formatter.py` `API_CATALOG`: one line. Help and "what can you do" read from it.
-- [ ] If it replaces a retired domain, remove that entry from `_RETIRED_TOPICS`.
-- [ ] Routing tests in `tests/test_routing.py` (once they exist; IMPROVEMENTS #1).
+- [ ] `keyword_router.py` `_BUSINESS_KEYWORDS` / `_TOPIC_GROUPS` if the new domain's nouns aren't covered.
+- [ ] `evidence.py` `trim_evidence` if responses can be large (>80 rows, or rows need a non-default order).
+- [ ] `evidence.py`: add the path to `build_request_preview` and a branch to `build_evidence_lines` (for `[DEV]`).
+- [ ] Dollar figures? Add to `_SALES_ENDPOINTS` (orchestrator.py) so the per-user gate applies.
+- [ ] `response_formatter.py` `API_CATALOG`: one line. Help, "what can you do", and every
+      "try asking about…" reply are built from it.
+- [ ] If it replaces a retired domain, remove that entry from `keyword_router._RETIRED_TOPICS`.
+- [ ] `pytest`, `ruff check`, `ruff format --check`, `mypy`: all clean.
 
 ## Verify
 

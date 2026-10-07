@@ -12,7 +12,7 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 from slack_sdk.errors import SlackApiError
-from slack_sdk.web import WebClient
+from slack_sdk.web import SlackResponse, WebClient
 
 from .config import BotSettings
 
@@ -30,7 +30,7 @@ def _post_message(
     text: str,
     blocks: list[dict[str, Any]] | None = None,
     attachments: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
+) -> SlackResponse:
     message_args: dict[str, Any] = {
         "channel": channel,
         "text": text,
@@ -44,8 +44,13 @@ def _post_message(
     return slack_client.chat_postMessage(**message_args)
 
 
+def _billing(order: dict[str, Any]) -> dict[str, Any]:
+    billing = order.get("billing")
+    return billing if isinstance(billing, dict) else {}
+
+
 def _build_wc_customer_name(order: dict[str, Any]) -> str:
-    billing = order.get("billing") if isinstance(order.get("billing"), dict) else {}
+    billing = _billing(order)
     first = str(billing.get("first_name") or "").strip()
     last = str(billing.get("last_name") or "").strip()
     full = f"{first} {last}".strip()
@@ -96,7 +101,7 @@ def _format_wc_message(settings: BotSettings, order: dict[str, Any]) -> tuple[st
     payment_method = str(order.get("payment_method_title") or "").strip()
     created_at = str(order.get("date_created") or "").strip()
     items = _build_wc_items(order)
-    billing = order.get("billing") if isinstance(order.get("billing"), dict) else {}
+    billing = _billing(order)
     customer_email = str(billing.get("email") or "").strip()
     order_url = _build_wc_order_url(settings, order_id)
 
@@ -314,6 +319,7 @@ def create_notification_app(
         }
 
     if slack_request_handler is not None:
+
         @app.post("/slack/events")
         async def slack_events(req: Request):
             return await slack_request_handler.handle(req)

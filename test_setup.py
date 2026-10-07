@@ -37,9 +37,9 @@ def check_environment():
         "AGENT_HISTORY_WINDOW": "6",
         "USE_SOCKET_MODE": "true",
     }
-    
+
     all_found = True
-    
+
     for key, example in required.items():
         value = os.getenv(key)
         if value:
@@ -48,12 +48,12 @@ def check_environment():
         else:
             print(f"  MISSING {key}: NOT SET (e.g., {example})")
             all_found = False
-    
+
     print("\nOptional settings:")
     for key, default in optional.items():
         value = os.getenv(key, default)
         print(f"  INFO {key}: {value}")
-    
+
     return all_found
 
 
@@ -68,7 +68,7 @@ def check_dependencies():
         "fastapi",
         "uvicorn",
     ]
-    
+
     all_found = True
     for package in required:
         try:
@@ -77,7 +77,7 @@ def check_dependencies():
         except ImportError:
             print(f"  MISSING {package} (install via: pip install -r requirements.txt)")
             all_found = False
-    
+
     return all_found
 
 
@@ -88,17 +88,16 @@ def check_directories():
         "src/connectbot",
         "logs",
     ]
-    
-    all_found = True
+
     for directory in required:
         if Path(directory).exists():
             print(f"  OK {directory}/")
         else:
             print(f"  MISSING {directory}/ (will be created on first run)")
-    
+
     # Create logs directory
     Path("logs").mkdir(exist_ok=True)
-    
+
     return True
 
 
@@ -107,20 +106,17 @@ def test_fastapi_connection():
     print("\nTesting FastAPI connection...")
     try:
         import httpx
-        
+
         base_url = os.getenv("FASTAPI_BASE_URL", "http://localhost:8100")
         api_key = os.getenv("FASTAPI_API_KEY")
-        
+
         if not api_key:
             print("  WARN FASTAPI_API_KEY not set - skipping connection test")
             return False
-        
+
         client = httpx.Client(timeout=5.0)
-        response = client.get(
-            f"{base_url}/v1/metrics/backlog",
-            headers={"X-API-Key": api_key}
-        )
-        
+        response = client.get(f"{base_url}/v1/metrics/backlog", headers={"X-API-Key": api_key})
+
         if response.status_code == 200:
             print(f"  OK Connected to {base_url}")
             data = response.json()
@@ -130,10 +126,10 @@ def test_fastapi_connection():
             print(f"  FAIL FastAPI returned {response.status_code}")
             print(f"     Response: {response.text[:200]}")
             return False
-    
+
     except Exception as e:
         print(f"  FAIL Error connecting to FastAPI: {e}")
-        print(f"     Make sure FastAPI is running and FASTAPI_BASE_URL is correct")
+        print("     Make sure FastAPI is running and FASTAPI_BASE_URL is correct")
         return False
 
 
@@ -142,7 +138,7 @@ def test_openrouter_connection():
     print("\nTesting OpenRouter connection...")
     try:
         import httpx
-        
+
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
             print("  WARN OPENROUTER_API_KEY not set - skipping OpenRouter test")
@@ -161,7 +157,7 @@ def test_openrouter_connection():
         print("  OK Connected to OpenRouter API")
         print(f"     Available models: {model_count}")
         return True
-    
+
     except Exception as e:
         print(f"  FAIL Error connecting to OpenRouter: {e}")
         return False
@@ -196,22 +192,22 @@ def test_ollama_connection():
 def test_slack_config():
     """Test Slack configuration"""
     print("\nTesting Slack configuration...")
-    
+
     from slack_bolt import App
-    
+
     try:
         token = os.getenv("SLACK_BOT_TOKEN")
         secret = os.getenv("SLACK_SIGNING_SECRET")
-        
+
         if not token or not secret:
             print("  FAIL SLACK_BOT_TOKEN or SLACK_SIGNING_SECRET not set")
             return False
-        
+
         # Initialize but don't start
-        app = App(token=token, signing_secret=secret)
+        App(token=token, signing_secret=secret)
         print("  OK Slack app configuration valid")
         return True
-    
+
     except Exception as e:
         print(f"  FAIL Error with Slack config: {e}")
         return False
@@ -222,11 +218,12 @@ def main():
     print("=" * 50)
     print("Connect Bot - Setup Verification")
     print("=" * 50)
-    
+
     # Load environment
     from dotenv import load_dotenv
+
     load_dotenv()
-    
+
     provider = os.getenv("LLM_PROVIDER", "openrouter").strip().lower()
     model_test_name = "Ollama" if provider == "ollama" else "OpenRouter"
     model_test_result = test_ollama_connection() if provider == "ollama" else test_openrouter_connection()
@@ -239,18 +236,18 @@ def main():
         model_test_name: model_test_result,
         "Slack": test_slack_config(),
     }
-    
+
     print("\n" + "=" * 50)
     print("Test Results Summary")
     print("=" * 50)
-    
+
     passed = sum(1 for v in results.values() if v)
     total = len(results)
-    
+
     for test, result in results.items():
         status = "PASS" if result else "FAIL"
         print(f"  {test:<15}: {status}")
-    
+
     print("\n" + "=" * 50)
     if passed == total:
         print(f"All tests passed! ({passed}/{total})")

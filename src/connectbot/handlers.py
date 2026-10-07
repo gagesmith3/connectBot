@@ -7,7 +7,8 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from slack_bolt import App
 
@@ -17,10 +18,7 @@ from .intent_parser import IntentParser
 from .ollama_client import OllamaClient
 from .openrouter_client import OpenRouterClient
 from .orchestrator import ConnectBotOrchestrator
-from .response_formatter import ResponseFormatter
-
-if TYPE_CHECKING:
-    from slack_bolt.response import BoltResponse
+from .response_formatter import ResponseFormatter, capability_summary
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +71,7 @@ def _build_intent_clarification(intent: dict[str, Any]) -> tuple[str, list] | No
     confidence = float(intent.get("confidence", 0.0))
 
     if confidence < 0.4 and endpoint not in {"help", "chat", None}:
-        text = "I might have mapped that wrong. Ask for backlog, heading metrics, wire inventory, wire usage, or wire demand."
+        text = f"I might have mapped that wrong. Ask for {capability_summary()}."
         return text, ResponseFormatter.format_chat(text)
 
     return None
@@ -95,9 +93,9 @@ def _get_dev_mode(text: str) -> str | None:
 def _strip_dev_prefix(text: str) -> str:
     stripped = text.strip()
     if stripped.upper().startswith(_DEV_FULL_PREFIX):
-        return stripped[len(_DEV_FULL_PREFIX):].strip()
+        return stripped[len(_DEV_FULL_PREFIX) :].strip()
     if stripped.upper().startswith(_DEV_PREFIX):
-        return stripped[len(_DEV_PREFIX):].strip()
+        return stripped[len(_DEV_PREFIX) :].strip()
     return stripped
 
 
@@ -183,9 +181,7 @@ def _append_dev_blocks(blocks: list, dev_info: dict | None) -> list:
             lines.append(f"*FastAPI URL:* {request.get('url')}")
     response = dev_info.get("fastapi_response")
     if response:
-        lines.append(
-            "*FastAPI Response Preview:* " + json.dumps(response, default=str)
-        )
+        lines.append("*FastAPI Response Preview:* " + json.dumps(response, default=str))
     if dev_info.get("llm_error"):
         lines.append(f"*LLM Error:* {dev_info['llm_error']}")
     if dev_info.get("evidence_lines"):
@@ -193,12 +189,15 @@ def _append_dev_blocks(blocks: list, dev_info: dict | None) -> list:
     if not lines:
         return blocks
     import copy
+
     result_blocks = copy.copy(blocks)
     result_blocks.append({"type": "divider"})
-    result_blocks.append({
-        "type": "context",
-        "elements": [{"type": "mrkdwn", "text": "\n".join(lines)}],
-    })
+    result_blocks.append(
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": "\n".join(lines)}],
+        }
+    )
     return result_blocks
 
 
@@ -289,6 +288,7 @@ def setup_handlers(app: App, settings: BotSettings) -> None:
         max_retries=settings.fastapi_max_retries,
         retry_backoff_seconds=settings.fastapi_retry_backoff_seconds,
     )
+    llm_client: OllamaClient | OpenRouterClient
     if settings.llm_provider == "ollama":
         llm_client = OllamaClient(
             model=settings.ollama_model,
@@ -429,7 +429,7 @@ def setup_handlers(app: App, settings: BotSettings) -> None:
                     stop_animation=stop_animation,
                 )
                 return
-            
+
             if intent.get("endpoint") in {"help", "chat"}:
                 text, blocks = _handle_local_only_response(formatter, intent)
                 _finalize_response(
@@ -586,7 +586,7 @@ def setup_handlers(app: App, settings: BotSettings) -> None:
                     stop_animation=stop_animation,
                 )
                 return
-            
+
             if intent.get("endpoint") in {"help", "chat"}:
                 text, blocks = _handle_local_only_response(formatter, intent)
                 _finalize_response(
@@ -655,7 +655,7 @@ def setup_handlers(app: App, settings: BotSettings) -> None:
 
 def _call_api(client: FastAPIClient, intent: dict) -> dict | None:
     """Call the FastAPI endpoint based on parsed intent"""
-    
+
     endpoint = intent.get("endpoint")
     params = intent.get("parameters", {})
 
@@ -664,10 +664,7 @@ def _call_api(client: FastAPIClient, intent: dict) -> dict | None:
             return client.get_backlog()
 
         elif endpoint == "heading":
-            return client.get_heading(
-                head_name=params.get("head_name"),
-                data_date=params.get("data_date")
-            )
+            return client.get_heading(head_name=params.get("head_name"), data_date=params.get("data_date"))
 
         elif endpoint == "heading_overall":
             return client.get_heading_overall(data_date=params.get("data_date"))

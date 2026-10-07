@@ -7,12 +7,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from slack_sdk.models.blocks import Block
-from slack_sdk.models.blocks import ContextBlock
-from slack_sdk.models.blocks import DividerBlock
-from slack_sdk.models.blocks import SectionBlock
+from slack_sdk.models.blocks import Block, ContextBlock, DividerBlock, SectionBlock
 from slack_sdk.models.blocks.block_elements import MarkdownTextObject
-
 
 # Slack rejects section blocks whose text exceeds 3000 characters.
 _SECTION_TEXT_LIMIT = 2900
@@ -25,12 +21,21 @@ API_CATALOG = [
     ("Backlog", "current snapshot, plus breakdowns by stud size/length/material/customer and per-lot detail"),
     ("Heading", "plan-vs-actual production — overall, per head, or WTD/MTD/YTD totals"),
     ("Sales & quotes", "daily Sage totals, top items, day-over-day trend, and multi-day series"),
-    ("Equipment", "machines/guns sold by model (week/month/YTD units), finished stock on hand, open build requests, low-stock build parts, and open/closed repair tickets"),
+    (
+        "Equipment",
+        "machines/guns sold by model (week/month/YTD units), finished stock on hand, open build requests, low-stock build parts, and open/closed repair tickets",
+    ),
     ("Wire inventory", "spool levels by location (shed/head/farm)"),
     ("Wire usage", "consumption over 30/90/180/365 days"),
     ("Wire demand", "4-week demand vs stock and shortages"),
     ("Data pipeline", "compute job health and freshness"),
 ]
+
+
+def capability_summary() -> str:
+    """One-line list of API_CATALOG for replies: "backlog, heading, ..., or data pipeline"."""
+    names = [name.lower() for name, _ in API_CATALOG]
+    return ", ".join(names[:-1]) + f", or {names[-1]}"
 
 
 # LLMs slip into markdown bold despite prompting; Slack mrkdwn needs *single*.
@@ -105,8 +110,7 @@ class ResponseFormatter:
                 return "No livewire demand rows in the latest snapshot."
 
             shortage_rows = [
-                row for row in rows
-                if bool(row.get("shortage_flag")) or float(row.get("delta_lbs") or 0) < 0
+                row for row in rows if bool(row.get("shortage_flag")) or float(row.get("delta_lbs") or 0) < 0
             ]
             total_shortage_lbs = round(
                 sum(abs(float(row.get("delta_lbs") or 0.0)) for row in shortage_rows),
@@ -134,14 +138,17 @@ class ResponseFormatter:
             rows = data.get("rows", [])
             if not rows:
                 return "No wire usage rows in the latest snapshot."
-            total_30d = round(sum(float(r.get("used_lbs_30d") or 0) for r in rows if r.get("dimension") == rows[0].get("dimension")), 2)
+            total_30d = round(
+                sum(float(r.get("used_lbs_30d") or 0) for r in rows if r.get("dimension") == rows[0].get("dimension")),
+                2,
+            )
             return (
                 f"Wire usage: {data.get('count', 0)} row(s); "
                 f"~{total_30d:,} lbs consumed in the last 30 days ({rows[0].get('dimension', 'n/a')} dimension)."
             )
 
         if endpoint == "help":
-            return "Ask about backlog, heading metrics (per header or plan-vs-actual), wire inventory, wire usage, or wire demand/shortages."
+            return f"Ask about {capability_summary()}."
 
         return "Request processed."
 
@@ -167,7 +174,7 @@ class ResponseFormatter:
     @staticmethod
     def format_backlog(data: dict[str, Any]) -> list[Block]:
         """Format backlog snapshot response"""
-        blocks = []
+        blocks: list[Block] = []
 
         if not data:
             blocks.append(SectionBlock(text="No backlog data available"))
@@ -186,7 +193,7 @@ class ResponseFormatter:
     @staticmethod
     def format_heading(data: dict[str, Any]) -> list[Block]:
         """Format heading metrics response"""
-        blocks = []
+        blocks: list[Block] = []
 
         if not data or data.get("count", 0) == 0:
             blocks.append(SectionBlock(text="No heading data available"))
@@ -195,9 +202,7 @@ class ResponseFormatter:
         count = data.get("count", 0)
         rows = data.get("rows", [])
 
-        blocks.append(
-            SectionBlock(text=f"Found {count} heading record(s)")
-        )
+        blocks.append(SectionBlock(text=f"Found {count} heading record(s)"))
 
         # Show first 5 rows as formatted text
         for row in rows[:5]:
@@ -208,9 +213,7 @@ class ResponseFormatter:
             blocks.append(SectionBlock(text=row_text))
 
         if count > 5:
-            blocks.append(
-                SectionBlock(text=f"_...and {count - 5} more records_")
-            )
+            blocks.append(SectionBlock(text=f"_...and {count - 5} more records_"))
 
         return blocks
 
@@ -222,7 +225,9 @@ class ResponseFormatter:
 
         if not rows:
             if material_query:
-                blocks.append(SectionBlock(text=f"No livewire shortage rows matched *{material_query}* in the latest snapshot."))
+                blocks.append(
+                    SectionBlock(text=f"No livewire shortage rows matched *{material_query}* in the latest snapshot.")
+                )
             else:
                 blocks.append(SectionBlock(text="No livewire material shortages in the latest snapshot."))
             return blocks
@@ -233,8 +238,7 @@ class ResponseFormatter:
         blocks.append(DividerBlock())
 
         sorted_rows = sorted(
-            [r for r in rows if float(r.get("delta_lbs") or 0.0) < 100],
-            key=lambda r: float(r.get("delta_lbs") or 0.0)
+            [r for r in rows if float(r.get("delta_lbs") or 0.0) < 100], key=lambda r: float(r.get("delta_lbs") or 0.0)
         )
 
         if not sorted_rows:
@@ -251,16 +255,16 @@ class ResponseFormatter:
         sep = "-" * len(header_row)
         table_lines = [header_row, sep]
         for row in sorted_rows:
-            material = (row.get("material_name") or row.get("material_code") or "")[:col_w["material"]]
+            material = (row.get("material_name") or row.get("material_code") or "")[: col_w["material"]]
             dia = f"{row.get('wire_dia_min')} – {row.get('wire_dia_max')}"
             delta = float(row.get("delta_lbs") or 0.0)
             delta_str = f"{'-' if delta < 0 else '+'}{abs(delta):.1f}"
             table_lines.append(
                 f"{material:<{col_w['material']}} {dia:<{col_w['dia']}} {delta_str:>{col_w['delta']}} "
-                f"{str(row.get('required_lbs') or ''):>{col_w['req']}} "
-                f"{str(row.get('shed_farm_lbs') or ''):>{col_w['shed']}} "
-                f"{str(row.get('head_backup_lbs') or ''):>{col_w['head']}} "
-                f"{str(row.get('selected_lot_count') or ''):>{col_w['lots']}}"
+                f"{row.get('required_lbs') or ''!s:>{col_w['req']}} "
+                f"{row.get('shed_farm_lbs') or ''!s:>{col_w['shed']}} "
+                f"{row.get('head_backup_lbs') or ''!s:>{col_w['head']}} "
+                f"{row.get('selected_lot_count') or ''!s:>{col_w['lots']}}"
             )
         blocks.append(SectionBlock(text="```" + "\n".join(table_lines) + "```"))
 
@@ -299,15 +303,12 @@ class ResponseFormatter:
     @staticmethod
     def format_unsupported_query() -> list[Block]:
         """Format message for unsupported queries"""
+        catalog = "\n".join(f"• *{name}* — {desc}" for name, desc in API_CATALOG)
         return [
             SectionBlock(
-                text="I can help you with:\n"
-                "• Current stud backlog status\n"
-                "• Heading metrics — per header or plan-vs-actual overall\n"
-                "• Wire inventory levels (shed/head/farm)\n"
-                "• Wire usage over 30/90/180/365 days\n"
-                "• Wire demand vs stock and shortages (for ordering)\n\n"
-                "Try asking: _What's the current backlog?_ or _How much mild steel should I order?_"
+                text=f"I can help you with:\n{catalog}\n\n"
+                "Try asking: _What's the current backlog?_, _How many machines did we sell this week?_ "
+                "or _How much mild steel should I order?_"
             ),
         ]
 

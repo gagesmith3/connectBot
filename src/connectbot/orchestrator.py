@@ -5,14 +5,28 @@ import logging
 import re
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
-from urllib.parse import urlencode
 
 from .api_client import FastAPIClient
+from .evidence import build_evidence_lines, build_request_preview, build_response_preview, trim_evidence
 from .intent_parser import IntentParser
+from .keyword_router import (
+    _BUSINESS_KEYWORDS,
+    _CAPABILITIES_HINTS,
+    _EQUIPMENT_NOUN_RE,
+    _FASTAPI_CONNECTIVITY_KEYWORDS,
+    _FOLLOWUP_HINTS,
+    _GREETING_TERMS,
+    _RUNDOWN_TERMS,
+    _THANKS_TERMS,
+    _TOPIC_GROUPS,
+    _extract_data_date,
+    _has_term,
+    resolve_keyword_intent,
+)
 from .llm_client import LLMClient
-from .response_formatter import API_CATALOG, ResponseFormatter
+from .response_formatter import API_CATALOG, ResponseFormatter, capability_summary
 from .tool_router import TOOL_DEFS, run_tool_loop
 
 # Endpoints that expose sales/quote dollar figures — gated per user when a
@@ -26,200 +40,6 @@ _SALES_RESTRICTED_MESSAGE = (
 
 logger = logging.getLogger(__name__)
 
-_BUSINESS_KEYWORDS = {
-    "iwt",
-    "summary",
-    "status",
-    "brief",
-    "operations",
-    "backlog",
-    "bottleneck",
-    "heading",
-    "header",
-    "trimmer",
-    "quality",
-    "adjustment",
-    "adjustments",
-    "lot",
-    "lots",
-    "mfgreq",
-    "manufacturing",
-    "lead time",
-    "eta",
-    "stud",
-    "repair",
-    "repairs",
-    "equipment",
-    "wire",
-    "livewire",
-    "material",
-    "mild steel",
-    "steel",
-    "order",
-    "shortage",
-    "inventory",
-    "plating",
-    "andon",
-    "sales",
-    "revenue",
-    "quote",
-    "quotes",
-    "sold",
-    "sage",
-    "machine",
-    "machines",
-    "quickshot",
-    "modular",
-    "titan",
-    "fusion",
-    "parts",
-    "build",
-    "builds",
-    "rundown",
-    "overview",
-    "report",
-    "full picture",
-    "big picture",
-    "day going",
-}
-
-_FASTAPI_CONNECTIVITY_KEYWORDS = {
-    "connectfastapi",
-    "connect fastapi",
-    "fastapi",
-    "api",
-}
-
-_FOLLOWUP_HINTS = {
-    "and",
-    "also",
-    "what about",
-    "how about",
-    "that one",
-    "same",
-    "next",
-    "more",
-    "details",
-    "breakdown",
-    "break down",
-    "break it down",
-    "split",
-    "by model",
-    "which models",
-}
-
-# Equipment nouns (machines, models from EQUIP/equipmentConfig.json, guns,
-# weld heads, feeder bowls). Paired with sold/stock verbs these route to the
-# open equipment_* endpoints instead of the gated dollar 'sales' endpoint.
-_EQUIPMENT_NOUN_RE = re.compile(
-    r"\b(machines?|equipment|quickshots?|modulars?|titan(?:\s+gfx)?|"
-    r"fusion(?:\s+(?:600|1000))?|atlas|freedom|liberty|"
-    r"weld\s*heads?|feeder\s*bowls?|guns?)\b"
-)
-
-_GREETING_TERMS = {
-    "hi",
-    "hello",
-    "hey",
-    "good morning",
-    "good afternoon",
-    "good evening",
-    "yo",
-}
-
-_THANKS_TERMS = {
-    "thanks",
-    "thank you",
-    "thx",
-    "appreciate it",
-}
-
-_CAPABILITIES_HINTS = {
-    "what can you do",
-    "what do you do",
-    "what else can you do",
-    "what are you capable of",
-    "what are your capabilities",
-    "tell me what you can do",
-    "what do you know",
-    "what do you support",
-    "what topics",
-    "what questions",
-    "what can you help",
-    "help me with",
-    "able to do",
-    "what are you able",
-    "capable of",
-    "what can i ask",
-    "what should i ask",
-    "what all can you",
-    "what kind of things",
-    "what kinds of things",
-    "what sort of things",
-    "what data do you",
-    "what do you have access",
-    "what apis",
-    "which apis",
-    "what endpoints",
-    "list your",
-    "your features",
-}
-
-
-_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
-
-
-def _extract_data_date(normalized: str) -> str | None:
-    """Pull an explicit date reference out of a query as ISO YYYY-MM-DD.
-
-    Handles "yesterday", "N days ago", "last friday", and "on 7/14" (slash
-    dates only — hyphens collide with head names like SP21-1). Returns None
-    when the query means "now/today", which is every endpoint's default.
-    """
-    today = date.today()
-
-    if "yesterday" in normalized:
-        return (today - timedelta(days=1)).isoformat()
-
-    match = re.search(r"\b(\d+)\s+days?\s+ago\b", normalized)
-    if match:
-        return (today - timedelta(days=int(match.group(1)))).isoformat()
-
-    match = re.search(
-        r"\b(?:last|this past|on)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
-        normalized,
-    )
-    if match:
-        delta = (today.weekday() - _WEEKDAYS.index(match.group(1))) % 7 or 7
-        return (today - timedelta(days=delta)).isoformat()
-
-    match = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b", normalized)
-    if match:
-        month, day = int(match.group(1)), int(match.group(2))
-        if not (1 <= month <= 12 and 1 <= day <= 31):
-            return None
-        year = int(match.group(3)) if match.group(3) else today.year
-        if year < 100:
-            year += 2000
-        try:
-            parsed = date(year, month, day)
-        except ValueError:
-            return None
-        if not match.group(3) and parsed > today:
-            parsed = date(year - 1, month, day)
-        return parsed.isoformat()
-
-    return None
-
-
-def _has_term(text: str, terms: set[str]) -> bool:
-    """Word-boundary match so 'yo' doesn't match inside 'you'."""
-    return any(
-        re.search(r"(?:^|\b)" + re.escape(term) + r"(?:\b|$)", text)
-        for term in terms
-    )
-
-
 _GREETING_RESPONSES = [
     "Hi! What can I help you with today?",
     "Hey! What can I do for you?",
@@ -232,50 +52,9 @@ _CAPABILITIES_TEXT = (
     + "\n\nJust ask naturally."
 )
 
-# Phrases that mean "give me the whole picture" — the tool router composes
-# these from several endpoints (heading_overall + sales + backlog, etc.).
-_RUNDOWN_TERMS = (
-    "rundown",
-    "run down",
-    "morning report",
-    "daily report",
-    "how's the day",
-    "hows the day",
-    "day going",
-    "full picture",
-    "big picture",
-    "summary",
-    "overview",
-    "brief",
-)
-
-# Distinct data topics; naming two or more in one question means a single
-# endpoint can't answer it, so it goes to the tool router.
-_TOPIC_GROUPS = {
-    "heading": ("heading", "header"),
-    "sales": ("sales", "revenue", "quote", "sold", "sage"),
-    "backlog": ("backlog", "bottleneck"),
-    "wire": ("wire", "livewire", "spool", "shortage"),
-    "equipment": ("machine", "equipment", "quickshot", "modular", "titan", "fusion", "build"),
-}
-
-# Data domains whose compute jobs are being rebuilt/verified one at a time.
-# Their endpoints were removed from connectFastAPI; answer honestly instead
-# of making a doomed API call or giving a vague failure.
-_RETIRED_TOPICS = {
-    "trimmers": ("trimmer", "trimmers"),
-    "manufacturing lots": ("lot", "lots", "mfgreq", "manufacturing request"),
-    "adjustments": ("adjustment", "adjustments"),
-    "data quality": ("data quality", "quality"),
-    "ETA / lead time": ("eta", "lead time"),
-    "manufacturing summary": ("summary", "brief", "overview"),
-    "backlog breakdown": (),  # reachable only via old LLM habits, not keywords
-}
-
 _RETIRED_MESSAGE = (
     "That data source ({topic}) is being rebuilt and verified right now, so I can't answer it yet. "
-    "What I can pull live: backlog, heading metrics (per header or plan-vs-actual overall), "
-    "daily sales & quotes, livewire wire inventory, wire usage, and wire demand/shortages."
+    f"What I can pull live: {capability_summary()}."
 )
 
 
@@ -330,9 +109,7 @@ class ConnectBotOrchestrator:
         self.general_prompt = self._build_general_prompt()
         self.business_prompt = self._build_business_prompt()
         self.tool_router_prompt = self._build_tool_router_prompt()
-        self._history: dict[str, deque[dict[str, str]]] = defaultdict(
-            lambda: deque(maxlen=self.history_window)
-        )
+        self._history: dict[str, deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=self.history_window))
         self._business_context: dict[str, dict[str, Any]] = {}
         self._last_mode: dict[str, str] = {}
 
@@ -347,11 +124,7 @@ class ConnectBotOrchestrator:
         )
 
     def _build_general_prompt(self) -> str:
-        notes = (
-            f" Additional personality notes: {self.bot_personality_notes}."
-            if self.bot_personality_notes
-            else ""
-        )
+        notes = f" Additional personality notes: {self.bot_personality_notes}." if self.bot_personality_notes else ""
         capabilities = "; ".join(f"{name} ({desc})" for name, desc in API_CATALOG)
         return (
             f"You are {self.bot_identity_name}, a Slack assistant for {self.bot_scope_name}. "
@@ -373,11 +146,7 @@ class ConnectBotOrchestrator:
         )
 
     def _build_business_prompt(self) -> str:
-        notes = (
-            f" Additional personality notes: {self.bot_personality_notes}."
-            if self.bot_personality_notes
-            else ""
-        )
+        notes = f" Additional personality notes: {self.bot_personality_notes}." if self.bot_personality_notes else ""
         return (
             f"You are {self.bot_identity_name}, an internal assistant for {self.bot_scope_name}. "
             f"Voice style: {self.bot_voice_style}. "
@@ -396,7 +165,7 @@ class ConnectBotOrchestrator:
             "- Tone: answer like a knowledgeable coworker in chat. For status questions "
             "('how's X today?'), reply with 1-2 short conversational sentences that lead with "
             "the headline numbers — e.g. \"We're about 70% to today's goal at 257,800 studs, "
-            "running 12% of planned rate.\" No bullets for these.\n"
+            'running 12% of planned rate." No bullets for these.\n'
             "- Keep it tight: headline numbers only, not every stat in the evidence. The user "
             "sees the conversation history and will ask a follow-up if they want more detail.\n"
             "- Use short bullet lists ONLY when the user explicitly asks for a breakdown, list, "
@@ -412,8 +181,7 @@ class ConnectBotOrchestrator:
 
     def _build_tool_router_prompt(self) -> str:
         return (
-            self.business_prompt
-            + "\n\nTool use:\n"
+            self.business_prompt + "\n\nTool use:\n"
             "- Call the tools needed to answer; combine several when the question spans "
             "topics (a daily rundown = heading_overall + sales + backlog).\n"
             "- OMIT data_date to get the latest data — never guess a date. Only pass "
@@ -533,10 +301,7 @@ class ConnectBotOrchestrator:
         }:
             return True
 
-        if any(hint in normalized for hint in _CAPABILITIES_HINTS):
-            return True
-
-        return False
+        return any(hint in normalized for hint in _CAPABILITIES_HINTS)
 
     def _handle_general_query(self, conversation_id: str, user_query: str) -> OrchestratorResult:
         if self._is_fastapi_connectivity_query(user_query):
@@ -683,224 +448,7 @@ class ConnectBotOrchestrator:
         return self._build_social_deterministic_result(user_query)
 
     def _resolve_keyword_intent(self, user_query: str) -> dict[str, Any] | None:
-        """Fast deterministic intent resolution from keywords — no LLM needed."""
-        normalized = re.sub(r"\s+", " ", user_query.strip().lower())
-        params: dict[str, Any] = {}
-        data_date = _extract_data_date(normalized)
-
-        def _dated(extra: dict[str, Any] | None = None) -> dict[str, Any]:
-            merged = dict(extra or {})
-            if data_date:
-                merged["data_date"] = data_date
-            return merged
-
-        def _material_hint() -> str | None:
-            for mat in ("mild steel", "stainless", "aluminum", "aluminium", "brass", "1010-ms", "302", "304", "316"):
-                if mat in normalized:
-                    return "aluminum" if mat == "aluminium" else mat
-            return None
-
-        # --- equipment units/stock/builds/parts — MUST run before the sales
-        # rule: "\bsold\b" below would otherwise send "machines sold" to the
-        # GATED dollar endpoint; equipment units are open to everyone. ---
-        equip_noun = _EQUIPMENT_NOUN_RE.search(normalized)
-
-        def _equip_type_and_model(noun: str) -> tuple[str | None, str | None]:
-            noun = re.sub(r"\s+", " ", noun.strip())
-            if noun.startswith("gun"):
-                return "GUN", None
-            if noun.startswith("weld"):
-                return "WELD HEAD", None
-            if noun.startswith("feeder"):
-                return "FEEDER BOWL", None
-            if noun.startswith("machine") or noun == "equipment":
-                return ("MACHINE", None) if noun.startswith("machine") else (None, None)
-            # a specific machine model name (quickshots -> QUICKSHOT, etc.)
-            model = noun.upper().rstrip("S") if noun in ("quickshots", "modulars") else noun.upper()
-            return "MACHINE", model
-
-        if equip_noun and re.search(r"\b(sold|sell|selling|sales?)\b", normalized):
-            equip_type, model = _equip_type_and_model(equip_noun.group(1))
-            eq_params: dict[str, Any] = {"group_by": "model"}
-            if re.search(r"\b(month|mtd)\b", normalized):
-                eq_params["window"] = "month"
-            elif re.search(r"\b(year|ytd|annual)\b", normalized):
-                eq_params["window"] = "ytd"
-            else:
-                eq_params["window"] = "week"
-            if data_date:
-                eq_params["start_date"] = data_date
-                eq_params["end_date"] = data_date
-            if equip_type:
-                eq_params["equip_type"] = equip_type
-            return {
-                "endpoint": "equipment_sold",
-                "parameters": eq_params,
-                "reasoning": "keyword: equipment noun + sold/sell",
-                "confidence": 0.9,
-            }
-
-        if equip_noun and re.search(r"\b(in stock|on hand|stock|ready|available)\b", normalized):
-            equip_type, model = _equip_type_and_model(equip_noun.group(1))
-            if equip_type:
-                params["equip_type"] = equip_type
-            if model:
-                params["model"] = model
-            return {
-                "endpoint": "equipment_stock",
-                "parameters": params,
-                "reasoning": "keyword: equipment noun + stock/on hand",
-                "confidence": 0.85,
-            }
-
-        if re.search(r"\b(open builds?|build pipeline|builds? in progress|being built|build requests?|equipment requests?)\b", normalized) or (
-            re.search(r"\bbuilds?\b", normalized)
-            and (equip_noun or re.search(r"\b(open|progress|pipeline|status|going|outstanding)\b", normalized))
-        ):
-            return {
-                "endpoint": "equipment_builds",
-                "parameters": {},
-                "reasoning": "keyword: equipment builds",
-                "confidence": 0.85,
-            }
-
-        if re.search(r"\bparts?\b", normalized) and re.search(
-            r"\b(low|min|minimum|reorder|stock|below|running out|need|order)\b", normalized
-        ):
-            if re.search(r"\ball parts\b|\bfull (parts )?list\b", normalized):
-                params["low_only"] = False
-            return {
-                "endpoint": "equipment_parts",
-                "parameters": params,
-                "reasoning": "keyword: parts + stock/low/reorder",
-                "confidence": 0.8,
-            }
-
-        # --- equipment repairs: open tickets vs closed/history ---
-        if re.search(r"\brepairs?\b", normalized):
-            if re.search(r"\b(closed|complete|completed|finished|done|history|past|shipped)\b", normalized):
-                return {
-                    "endpoint": "equipment_repairs_history",
-                    "parameters": {},
-                    "reasoning": "keyword: repairs + closed/history",
-                    "confidence": 0.85,
-                }
-            stage_params: dict[str, Any] = {}
-            if re.search(r"\breceived\b", normalized):
-                stage_params["stage"] = "RECEIVED"
-            elif re.search(r"\bdiagnos", normalized):
-                stage_params["stage"] = "DIAGNOSED"
-            elif re.search(r"\brepairing\b|\bin repair\b|\bpending\b", normalized):
-                stage_params["stage"] = "REPAIRING"
-            return {
-                "endpoint": "equipment_repairs",
-                "parameters": stage_params,
-                "reasoning": "keyword: repairs (open)",
-                "confidence": 0.85,
-            }
-
-        # --- sales / quotes (Sage) — before generic order/summary rules ---
-        if re.search(r"\bsales?\b|\brevenue\b|\bquotes?\b|\bsold\b|\binvoices?\b|\bsage\b", normalized):
-            trend_terms = (
-                "trend", "over the past", "over the last", "past week", "last week",
-                "past month", "last month", "history", "chart", "series", "per day",
-                "each day", "daily breakdown",
-            )
-            if any(term in normalized for term in trend_terms):
-                # Multi-day series lives in sage_trend — tool router picks days.
-                return None
-            return {"endpoint": "sales", "parameters": _dated(), "reasoning": "keyword: sales/quotes/revenue", "confidence": 0.85}
-
-        # --- livewire inventory (stock on hand) ---
-        if "inventory" in normalized or "in stock" in normalized or "on hand" in normalized or (
-            ("spool" in normalized or "shed" in normalized or "farm" in normalized)
-            and "shortage" not in normalized
-            and "order" not in normalized
-        ):
-            for loc in ("shed", "head", "farm"):
-                if loc in normalized:
-                    params["location"] = loc.upper()
-                    break
-            return {"endpoint": "livewire_inventory", "parameters": params, "reasoning": "keyword: inventory/stock/spool", "confidence": 0.85}
-
-        # --- livewire usage (consumption over time) ---
-        if any(kw in normalized for kw in ("usage", "consumption", "consumed", "used", "using")) and (
-            "wire" in normalized or "material" in normalized or "livewire" in normalized or "vendor" in normalized
-        ):
-            if "vendor" in normalized:
-                params["dimension"] = "vendor"
-            elif "dia" in normalized or "diameter" in normalized:
-                params["dimension"] = "wire_dia"
-            elif "material" in normalized:
-                params["dimension"] = "material"
-            return {"endpoint": "livewire_usage", "parameters": params, "reasoning": "keyword: usage/consumption", "confidence": 0.85}
-
-        # --- livewire demand / shortages / ordering ---
-        if any(kw in normalized for kw in ("wire", "livewire", "shortage", "mild steel", "demand")):
-            mat = _material_hint()
-            if mat:
-                params["material_query"] = mat
-            if "shortage" in normalized or "short" in normalized:
-                params["shortages_only"] = True
-            return {"endpoint": "livewire_demand", "parameters": params, "reasoning": "keyword: wire/livewire/shortage/demand", "confidence": 0.85}
-
-        # --- retired data domains: answer honestly, no doomed API call ---
-        # Word-boundary match: "eta" must not fire inside "detail", etc.
-        for topic, keywords in _RETIRED_TOPICS.items():
-            if keywords and any(re.search(r"\b" + re.escape(kw) + r"\b", normalized) for kw in keywords):
-                return {"endpoint": "retired", "parameters": {"topic": topic}, "reasoning": f"keyword: retired topic {topic}", "confidence": 0.9}
-
-        # --- backlog ---
-        if "backlog" in normalized or "bottleneck" in normalized:
-            drill_terms = (
-                "by ", "per ", "size", "length", "material", "customer",
-                "largest", "biggest", "top ", "breakdown", "break down",
-                "which", "flange", "type", "lot", "header",
-            )
-            if any(term in normalized for term in drill_terms):
-                # Grouped/filtered backlog questions need backlog_breakdown or
-                # backlog_lots — let the tool router pick dimension and filters.
-                return None
-            return {"endpoint": "backlog", "parameters": {}, "reasoning": "keyword: backlog", "confidence": 0.85}
-
-        # --- heading: overall plan-vs-actual by default; per-head rows only when asked ---
-        if "heading" in normalized or "header" in normalized:
-            head_match = re.search(
-                r"\b(carlo[\s_-]*salvi|salvi|feng[\s_-]*pei[\s_-]*([123])?|national[\s_-]*([123])?|sp[\s_-]*11|sp[\s_-]*21[\s_-]*([12])?)\b",
-                normalized,
-            )
-            if head_match:
-                raw = head_match.group(1)
-                if "salvi" in raw:
-                    params["head_name"] = "CARLO_SALVI"
-                elif "feng" in raw and head_match.group(2):
-                    params["head_name"] = f"FENG_PEI_{head_match.group(2)}"
-                elif "national" in raw and head_match.group(3):
-                    params["head_name"] = f"NATIONAL_{head_match.group(3)}"
-                elif "21" in raw and head_match.group(4):
-                    params["head_name"] = f"SP21-{head_match.group(4)}"
-                elif "11" in raw:
-                    params["head_name"] = "SP11"
-                # A head family without a number (e.g. "feng pei") falls through
-                # with no head_name — full per-head rows let the LLM answer it.
-                return {"endpoint": "heading", "parameters": _dated(params), "reasoning": "keyword: specific head", "confidence": 0.85}
-            breakdown_terms = (
-                "by head", "per head", "each head", "which head", "every head",
-                "by header", "per header", "each header", "which header",
-                "breakdown", "break down", "all heads", "all headers", "individual",
-            )
-            if any(term in normalized for term in breakdown_terms):
-                return {"endpoint": "heading", "parameters": _dated(), "reasoning": "keyword: heading per-head breakdown", "confidence": 0.85}
-            return {"endpoint": "heading_overall", "parameters": _dated(), "reasoning": "keyword: heading status (overall plan-vs-actual)", "confidence": 0.85}
-
-        # --- material / order (generic) → demand ---
-        if any(kw in normalized for kw in ("material", "order")):
-            mat = _material_hint()
-            if mat:
-                params["material_query"] = mat
-            return {"endpoint": "livewire_demand", "parameters": params, "reasoning": "keyword: material/order", "confidence": 0.70}
-
-        return None
+        return resolve_keyword_intent(user_query)
 
     def _resolve_followup_intent(self, conversation_id: str, user_query: str) -> dict[str, Any] | None:
         """Reuse the previous business endpoint for short follow-ups ("and yesterday?")."""
@@ -929,11 +477,7 @@ class ConnectBotOrchestrator:
 
         Returns None on any failure so the caller falls back to legacy routing.
         """
-        history = [
-            message
-            for message in list(self._history.get(conversation_id, []))[-4:]
-            if message.get("content")
-        ]
+        history = [message for message in list(self._history.get(conversation_id, []))[-4:] if message.get("content")]
         # Computed per call — the bot process runs for days, and the model
         # will otherwise guess dates from its training data.
         system_prompt = f"{self.tool_router_prompt}\nToday's date is {date.today().isoformat()}."
@@ -977,12 +521,7 @@ class ConnectBotOrchestrator:
         normalized_query = re.sub(r"\s+", " ", user_query.strip().lower())
         wants_rundown = any(term in normalized_query for term in _RUNDOWN_TERMS)
         multi_topic = (
-            sum(
-                1
-                for keywords in _TOPIC_GROUPS.values()
-                if any(kw in normalized_query for kw in keywords)
-            )
-            >= 2
+            sum(1 for keywords in _TOPIC_GROUPS.values() if any(kw in normalized_query for kw in keywords)) >= 2
         )
         # "How many machines have we sold?" trips both the sales group (sold)
         # and the equipment group (machine) but is ONE topic — equipment units.
@@ -995,8 +534,7 @@ class ConnectBotOrchestrator:
                     sum(
                         1
                         for topic, keywords in _TOPIC_GROUPS.items()
-                        if topic != "sales"
-                        and any(kw in normalized_query for kw in keywords)
+                        if topic != "sales" and any(kw in normalized_query for kw in keywords)
                     )
                     >= 2
                 )
@@ -1005,14 +543,11 @@ class ConnectBotOrchestrator:
         # Rundown/multi-topic questions need several endpoints, which only the
         # tool router can compose — skip the single-endpoint keyword rules.
         if not (self.use_tool_router and (wants_rundown or multi_topic)):
-            intent = (
-                self._resolve_keyword_intent(user_query)
-                or self._resolve_followup_intent(conversation_id, user_query)
+            intent = self._resolve_keyword_intent(user_query) or self._resolve_followup_intent(
+                conversation_id, user_query
             )
         if intent is None and self.use_tool_router:
-            tool_result = self._handle_tool_router_query(
-                conversation_id, user_query, is_dev=is_dev, user_id=user_id
-            )
+            tool_result = self._handle_tool_router_query(conversation_id, user_query, is_dev=is_dev, user_id=user_id)
             if tool_result is not None:
                 return tool_result
         if intent is None:
@@ -1032,7 +567,7 @@ class ConnectBotOrchestrator:
             f"parse_intent(endpoint={endpoint})",
             f"intent_confidence({intent.get('confidence', 'n/a')})",
         ]
-        request_preview = self._build_fastapi_request_preview(endpoint, intent.get("parameters", {}))
+        request_preview = build_request_preview(self.fastapi_client.base_url, endpoint, intent.get("parameters", {}))
         base_dev_info = (
             {
                 "intent_reasoning": intent.get("reasoning"),
@@ -1062,10 +597,7 @@ class ConnectBotOrchestrator:
         if confidence < 0.4 and endpoint not in {"help", "chat", None}:
             if base_dev_info is not None:
                 base_dev_info["decision_path"].append("clarify_low_confidence_intent")
-            prompt = (
-                "I might have mapped that wrong. Do you want backlog, heading metrics, sales, "
-                "wire inventory, wire usage, or wire demand/shortages?"
-            )
+            prompt = f"I might have mapped that wrong. Do you want {capability_summary()}?"
             return OrchestratorResult(
                 text=prompt,
                 blocks=self.formatter.format_chat(prompt),
@@ -1078,7 +610,7 @@ class ConnectBotOrchestrator:
                 base_dev_info["decision_path"].append("unsupported_business_endpoint")
             text = (
                 "I understood that as a business-style request, but I couldn't map it to a supported data call yet. "
-                "Try asking about backlog, heading metrics, sales, wire inventory, wire usage, or wire demand."
+                f"Try asking about {capability_summary()}."
             )
             return OrchestratorResult(
                 text=text,
@@ -1118,7 +650,7 @@ class ConnectBotOrchestrator:
             dev_info=(
                 {
                     **base_dev_info,
-                    "fastapi_response": self._build_fastapi_response_preview(response_data),
+                    "fastapi_response": build_response_preview(response_data),
                     "fastapi_response_raw": response_data,
                 }
                 if base_dev_info is not None
@@ -1138,9 +670,9 @@ class ConnectBotOrchestrator:
             if is_dev:
                 dev_info = {
                     **(base_dev_info or {}),
-                    "fastapi_response": self._build_fastapi_response_preview(response_data),
+                    "fastapi_response": build_response_preview(response_data),
                     "fastapi_response_raw": response_data,
-                    "evidence_lines": self._build_evidence_lines(endpoint, response_data),
+                    "evidence_lines": build_evidence_lines(endpoint, response_data),
                 }
                 dev_info.setdefault("decision_path", []).append("return_deterministic_livewire_format")
             return OrchestratorResult(
@@ -1154,11 +686,7 @@ class ConnectBotOrchestrator:
 
         evidence_data = self._trim_evidence(endpoint, response_data)
         evidence_text = json.dumps(evidence_data, default=str, indent=2)
-        history = [
-            message
-            for message in list(self._history.get(conversation_id, []))[-4:]
-            if message.get("content")
-        ]
+        history = [message for message in list(self._history.get(conversation_id, []))[-4:] if message.get("content")]
         messages = [
             {"role": "system", "content": self.business_prompt},
             *history,
@@ -1189,7 +717,7 @@ class ConnectBotOrchestrator:
                     dev_info=(
                         {
                             **base_dev_info,
-                            "fastapi_response": self._build_fastapi_response_preview(response_data),
+                            "fastapi_response": build_response_preview(response_data),
                             "fastapi_response_raw": response_data,
                             "llm_error": str(error),
                         }
@@ -1203,13 +731,13 @@ class ConnectBotOrchestrator:
             if base_dev_info is not None:
                 base_dev_info["decision_path"].append("llm_failed_use_structured_fallback")
 
-        evidence_lines = self._build_evidence_lines(endpoint, response_data)
+        evidence_lines = build_evidence_lines(endpoint, response_data)
         self._remember_business_context(conversation_id, endpoint, intent, response_data)
         dev_info = None
         if is_dev:
             dev_info = {
                 **(base_dev_info or {}),
-                "fastapi_response": self._build_fastapi_response_preview(response_data),
+                "fastapi_response": build_response_preview(response_data),
                 "fastapi_response_raw": response_data,
                 "evidence_lines": evidence_lines,
             }
@@ -1225,39 +753,7 @@ class ConnectBotOrchestrator:
 
     @staticmethod
     def _trim_evidence(endpoint: str, data: dict[str, Any]) -> dict[str, Any]:
-        """Reduce large row sets before sending evidence to the LLM.
-
-        The heading endpoint returns ~500 rows spanning weeks of history; dumping
-        it all into the prompt is slow, expensive, and drowns the answer. Rows
-        arrive newest-first, so keep only the most recent slice.
-        """
-        rows = data.get("rows")
-        if not isinstance(rows, list) or len(rows) <= 80:
-            return data
-
-        if endpoint == "heading":
-            # Keep the 7 most recent data_dates (covers "today" and week trends).
-            recent_dates: list[str] = []
-            trimmed_rows: list[dict[str, Any]] = []
-            for row in rows:
-                row_date = str(row.get("data_date", ""))
-                if row_date not in recent_dates:
-                    if len(recent_dates) >= 7:
-                        break
-                    recent_dates.append(row_date)
-                trimmed_rows.append(row)
-            trimmed_rows = trimmed_rows[:80]
-        else:
-            trimmed_rows = rows[:80]
-
-        return {
-            **data,
-            "rows": trimmed_rows,
-            "evidence_note": (
-                f"Showing the {len(trimmed_rows)} most recent of {len(rows)} total rows "
-                "(newest first); older history omitted."
-            ),
-        }
+        return trim_evidence(endpoint, data)
 
     def _remember_business_context(
         self,
@@ -1316,172 +812,6 @@ class ConnectBotOrchestrator:
                     ),
                 )
         return None
-
-    def _build_fastapi_request_preview(self, endpoint: str | None, params: dict[str, Any]) -> dict[str, Any] | None:
-        path_by_endpoint = {
-            "backlog": "/v1/metrics/backlog",
-            "backlog_breakdown": "/v1/metrics/backlog/breakdown",
-            "backlog_lots": "/v1/metrics/backlog/lots",
-            "heading": "/v1/metrics/heading",
-            "heading_overall": "/v1/metrics/heading/overall",
-            "heading_summary": "/v1/metrics/heading/summary",
-            "livewire_demand": "/v1/metrics/livewire/demand",
-            "livewire_inventory": "/v1/metrics/livewire/inventory",
-            "livewire_usage": "/v1/metrics/livewire/usage",
-            "sales": "/v1/metrics/sage/daily + /v1/metrics/sage/summary",
-            "sage_trend": "/v1/metrics/sage/trend",
-            "equipment_sold": "/v1/metrics/equipment/sold",
-            "equipment_stock": "/v1/metrics/equipment/stock",
-            "equipment_builds": "/v1/metrics/equipment/builds",
-            "equipment_parts": "/v1/metrics/equipment/parts",
-            "equipment_repairs": "/v1/metrics/equipment/repairs",
-            "equipment_repairs_history": "/v1/metrics/equipment/repairs/history",
-            "compute_runs": "/v1/metrics/compute/runs",
-        }
-        if not endpoint:
-            return None
-        path = path_by_endpoint.get(endpoint, "unknown")
-        encoded = urlencode(params, doseq=True)
-        url = f"{self.fastapi_client.base_url}{path}"
-        if encoded:
-            url = f"{url}?{encoded}"
-        return {
-            "method": "GET",
-            "path": path,
-            "url": url,
-            "params": params,
-        }
-
-    def _build_fastapi_response_preview(self, data: dict[str, Any]) -> dict[str, Any]:
-        preview: dict[str, Any] = {"keys": sorted(list(data.keys()))}
-        if "count" in data:
-            preview["count"] = data.get("count")
-        rows = data.get("rows")
-        if isinstance(rows, list):
-            preview["rows_count"] = len(rows)
-            preview["rows_sample"] = rows[:2]
-            if rows and all(isinstance(row, dict) for row in rows):
-                shortage_rows = [row for row in rows if bool(row.get("shortage_flag"))]
-                preview["shortage_rows"] = len(shortage_rows)
-                preview["non_shortage_rows"] = len(rows) - len(shortage_rows)
-                delta_values = [
-                    float(row["delta_lbs"])
-                    for row in rows
-                    if row.get("delta_lbs") is not None
-                ]
-                if delta_values:
-                    preview["delta_lbs_min"] = min(delta_values)
-                    preview["delta_lbs_max"] = max(delta_values)
-        return preview
-
-    def _build_evidence_lines(self, endpoint: str, data: dict[str, Any]) -> list[str]:
-        if endpoint == "backlog":
-            return [
-                f"Active lots: {data.get('active_lots', 'n/a')}",
-                f"Total qty: {data.get('total_qty', 'n/a')}",
-                f"Heading queue qty: {data.get('heading_qty', 'n/a')}",
-                f"Snapshot: {data.get('snapshot_ts', 'n/a')}",
-            ]
-        if endpoint == "heading":
-            return [f"Rows returned: {data.get('count', 0)}"]
-        if endpoint == "heading_overall":
-            return [
-                f"Plan studs: {data.get('plan_studs', 'n/a')}",
-                f"Actual studs: {data.get('actual_studs', 'n/a')}",
-                f"Volume %: {data.get('volume_pct', 'n/a')}",
-                f"Running headers: {data.get('running_headers_count', 'n/a')}",
-            ]
-        if endpoint == "livewire_demand":
-            rows = data.get("rows", [])
-            if not rows:
-                return ["No livewire demand rows returned"]
-            first = rows[0]
-            return [
-                f"Rows returned: {data.get('count', 0)}",
-                f"Material: {first.get('material_code', 'n/a')} ({first.get('material_name', 'n/a')})",
-                f"Top shortage delta lbs: {first.get('delta_lbs', 'n/a')}",
-                f"Snapshot: {first.get('snapshot_ts', 'n/a')}",
-            ]
-        if endpoint == "livewire_inventory":
-            rows = data.get("rows", [])
-            total_weight = round(sum(float(r.get("weight_lbs") or 0) for r in rows), 2)
-            total_spools = sum(int(r.get("spool_count") or 0) for r in rows)
-            return [
-                f"Groups returned: {data.get('count', 0)}",
-                f"Total weight lbs: {total_weight}",
-                f"Total spools: {total_spools}",
-                f"Location filter: {data.get('location') or 'all'}",
-            ]
-        if endpoint == "livewire_usage":
-            return [
-                f"Rows returned: {data.get('count', 0)}",
-                f"Dimension filter: {data.get('dimension') or 'all'}",
-            ]
-        if endpoint == "sales":
-            daily = data.get("daily") or {}
-            summary = data.get("summary") or {}
-            return [
-                f"Data date: {daily.get('data_date') or summary.get('data_date') or 'n/a'}",
-                f"Sales today: ${daily.get('sales_total', 'n/a')} across {daily.get('sales_orders', 'n/a')} orders",
-                f"Quotes today: ${daily.get('quotes_total', 'n/a')}",
-                f"Sales vs prev business day: {summary.get('sales_trend_pct', 'n/a')}%",
-            ]
-        if endpoint == "equipment_sold":
-            def _units(value: Any) -> str:
-                try:
-                    return f"{float(value):g}"
-                except (TypeError, ValueError):
-                    return "n/a"
-
-            rows = data.get("rows", [])
-            top = ", ".join(
-                f"{r.get('label')} x{_units(r.get('units'))}" for r in rows[:3] if r.get("units")
-            )
-            return [
-                f"Window: {data.get('window')} ({data.get('start_date')} to {data.get('end_date')})",
-                f"Machines sold: {_units(data.get('machine_units'))}",
-                f"All equipment units: {_units(data.get('total_units'))}",
-                f"Top: {top or 'none'}",
-            ]
-        if endpoint == "equipment_stock":
-            by_type = ", ".join(
-                f"{t.get('equip_type')}: {t.get('units')}" for t in data.get("by_type", [])
-            )
-            return [
-                f"Ready units in stock: {data.get('total_units', 'n/a')}",
-                f"By type: {by_type or 'none'}",
-                f"Snapshot: {data.get('snapshot_ts', 'n/a')}",
-            ]
-        if endpoint == "equipment_builds":
-            return [
-                f"Open build requests: {data.get('count', 0)}",
-                f"Owed (unbuilt) units: {data.get('owed_units_total', 0)}",
-                f"Snapshot: {data.get('snapshot_ts', 'n/a')}",
-            ]
-        if endpoint == "equipment_parts":
-            return [
-                f"Parts below minimum: {data.get('low_count', 0)} of {data.get('total_parts', 0)}",
-                f"Snapshot: {data.get('snapshot_ts', 'n/a')}",
-            ]
-        if endpoint == "equipment_repairs":
-            rows = data.get("rows", [])
-            by_stage: dict[str, int] = defaultdict(int)
-            for r in rows:
-                by_stage[r.get("stage") or "n/a"] += 1
-            stage_breakdown = ", ".join(f"{k}: {v}" for k, v in by_stage.items())
-            return [
-                f"Open repairs: {data.get('count', 0)}",
-                f"By stage: {stage_breakdown or 'none'}",
-                f"Snapshot: {data.get('snapshot_ts', 'n/a')}",
-            ]
-        if endpoint == "equipment_repairs_history":
-            return [
-                f"Closed repairs returned: {data.get('count', 0)}",
-                f"Customer filter: {data.get('customer') or 'all'}",
-                f"Date range: {data.get('start_date') or 'any'} to {data.get('end_date') or 'any'}",
-                f"Snapshot: {data.get('snapshot_ts', 'n/a')}",
-            ]
-        return []
 
     def _call_api(self, intent: dict[str, Any]) -> dict[str, Any] | None:
         endpoint = intent.get("endpoint")

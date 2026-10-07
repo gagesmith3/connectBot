@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,10 @@ TOOL_DEFS: list[dict[str, Any]] = [
                         "type": "integer",
                         "description": "Max groups to return, largest first (default 10).",
                     },
-                    "stud_size": {"type": "string", "description": "Filter: exact stud size, e.g. '1/4-20', '10-32', 'M6'."},
+                    "stud_size": {
+                        "type": "string",
+                        "description": "Filter: exact stud size, e.g. '1/4-20', '10-32', 'M6'.",
+                    },
                     "stud_material": {"type": "string", "description": "Filter: exact stud material name."},
                     "stud_flange": {"type": "string", "description": "Filter: flange type."},
                     "stud_type": {"type": "string", "description": "Filter: stud type."},
@@ -293,8 +297,14 @@ TOOL_DEFS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "customer": {"type": "string", "description": "Optional exact customer name filter."},
-                    "start_date": {"type": "string", "description": "Optional ISO range start YYYY-MM-DD, filters on date received."},
-                    "end_date": {"type": "string", "description": "Optional ISO range end YYYY-MM-DD, filters on date received."},
+                    "start_date": {
+                        "type": "string",
+                        "description": "Optional ISO range start YYYY-MM-DD, filters on date received.",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "Optional ISO range end YYYY-MM-DD, filters on date received.",
+                    },
                     "limit": {
                         "type": "integer",
                         "description": "Max rows to return, 1-500 (default 100).",
@@ -437,11 +447,8 @@ def run_tool_loop(
             if not isinstance(arguments, dict):
                 arguments = {}
 
-            if name in allowed_names:
-                data = call_api({"endpoint": name, "parameters": arguments})
-            else:
-                # Never execute a tool that wasn't offered (access control).
-                data = None
+            # Never execute a tool that wasn't offered (access control).
+            data = call_api({"endpoint": name, "parameters": arguments}) if name in allowed_names else None
             tools_used.append({"tool": name, "arguments": arguments, "ok": data is not None})
             logger.info("Tool router called %s(%s) -> %s", name, arguments, "ok" if data is not None else "no data")
             if data is None:

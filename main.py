@@ -23,9 +23,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import uvicorn
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
-import uvicorn
 
 from src.connectbot.config import BotSettings
 from src.connectbot.handlers import setup_handlers
@@ -105,7 +105,13 @@ def main():
         api = create_notification_app(_settings, slack_app.client, slack_handler)
 
         logger.info(f"Starting HTTP server on 0.0.0.0:{_settings.server_port}")
-        uvicorn.run(api, host="0.0.0.0", port=_settings.server_port, ssl_keyfile=_settings.ssl_key_file, ssl_certfile=_settings.ssl_cert_file)
+        uvicorn.run(
+            api,
+            host="0.0.0.0",
+            port=_settings.server_port,
+            ssl_keyfile=_settings.ssl_key_file,
+            ssl_certfile=_settings.ssl_cert_file,
+        )
 
 
 if __name__ == "__main__":
