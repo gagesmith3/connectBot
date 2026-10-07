@@ -1,0 +1,25 @@
+[Unit]
+Description=Connect Bot - AI-Powered Slack Bot for Business Operations
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/projects/connectBot
+Environment="PATH=/home/pi/projects/connectBot/venv/bin"
+EnvironmentFile=/home/pi/projects/connectBot/.env
+ExecStart=/home/pi/projects/connectBot/venv/bin/python main.py
+Restart=always
+RestartSec=10
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=connectbot
+
+[Install]
+WantedBy=multi-user.target

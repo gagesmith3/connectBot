@@ -1,0 +1,11 @@
+# Secrets — never commit (.env.example is the template)
+.env
+
+# Local runtime
+venv/
+logs/
+__pycache__/
+*.pyc
+
+# Claude Code per-user settings
+.claude/settings.local.json
