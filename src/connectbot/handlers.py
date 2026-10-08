@@ -335,6 +335,7 @@ def setup_handlers(app: App, settings: BotSettings) -> None:
         bot_personality_notes=settings.bot_personality_notes,
         social_deterministic_mode=settings.social_deterministic_mode,
         use_tool_router=settings.use_tool_router,
+        answer_spec_enabled=settings.answer_spec_enabled,
         sales_access_users=settings.sales_access_users,
     )
 

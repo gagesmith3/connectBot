@@ -22,8 +22,10 @@ in every step below. All the steps key on that one name.
       must not match), plus a flow test in `tests/test_orchestrator_flow.py` using
       `fake_api.routes["/v1/metrics/..."] = {...}`.
 - [ ] `api_client.py`: `get_<thing>()` calling `self._request_json("/v1/metrics/...", params=...)`;
-      drop `None` params. **GET only.** `test_api_client_readonly.py` picks up every
-      `get_*` automatically (see CLAUDE.md "Data sources").
+      drop `None` **and blank** params (`if value:`). gpt-6-luna sends `""` for every
+      optional argument, and a blank filter like `stud_size=` matches zero rows.
+      **GET only.** `test_api_client_readonly.py` picks up every `get_*` automatically
+      (see CLAUDE.md "Data sources").
 - [ ] `orchestrator.py` `_call_api`: `if endpoint == "<name>": return self.fastapi_client.get_<thing>(...)`.
 - [ ] `tool_router.py` `TOOL_DEFS`: add a tool with that name. The description should
       say when to use it **and when not to** (point to the neighbouring tool).
@@ -36,6 +38,9 @@ in every step below. All the steps key on that one name.
 - [ ] `evidence.py` `trim_evidence` if responses can be large (>80 rows, or rows need a non-default order).
 - [ ] `evidence.py`: add the path to `build_request_preview` and a branch to `build_evidence_lines` (for `[DEV]`).
 - [ ] Dollar figures? Add to `_SALES_ENDPOINTS` (orchestrator.py) so the per-user gate applies.
+- [ ] Natural comparison (vs plan, vs prior period, share of total, below minimum)? Add a
+      fact function to `insights._FACTS`, plus a `comparison_intent` branch if it needs a
+      second fetch. Tests go in `tests/test_insights.py`.
 - [ ] `response_formatter.py` `API_CATALOG`: one line. Help, "what can you do", and every
       "try asking about…" reply are built from it.
 - [ ] If it replaces a retired domain, remove that entry from `keyword_router._RETIRED_TOPICS`.

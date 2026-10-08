@@ -4,12 +4,15 @@ import json
 import logging
 import re
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date
 from typing import Any
 
+from .answer_renderer import render
+from .answer_spec import JSON_SCHEMA_PROMPT, parse_answer_spec
 from .api_client import FastAPIClient
 from .evidence import build_evidence_lines, build_request_preview, build_response_preview, trim_evidence
+from .insights import Fact, comparison_intent, compute_facts
 from .intent_parser import IntentParser
 from .keyword_router import (
     _BUSINESS_KEYWORDS,
@@ -86,6 +89,7 @@ class ConnectBotOrchestrator:
         bot_personality_notes: str = "",
         social_deterministic_mode: bool = True,
         use_tool_router: bool = True,
+        answer_spec_enabled: bool = True,
         sales_access_users: set[str] | None = None,
     ):
         self.llm_client = llm_client
@@ -100,6 +104,7 @@ class ConnectBotOrchestrator:
         self.bot_voice_style = bot_voice_style
         self.bot_personality_notes = bot_personality_notes
         self.social_deterministic_mode = social_deterministic_mode
+        self.answer_spec_enabled = answer_spec_enabled
         # Tool calling needs the OpenRouter client; Ollama's client has no
         # complete_with_tools, so the flag quietly disables itself there.
         self.use_tool_router = use_tool_router and hasattr(llm_client, "complete_with_tools")
@@ -145,9 +150,13 @@ class ConnectBotOrchestrator:
             f"{notes}"
         )
 
-    def _build_business_prompt(self) -> str:
+    def _build_business_prompt(self, spec: bool | None = None) -> str:
+        """Grounding rules plus output rules: the JSON answer spec when
+        structured answers are on, otherwise Slack-mrkdwn prose."""
+        if spec is None:
+            spec = self.answer_spec_enabled
         notes = f" Additional personality notes: {self.bot_personality_notes}." if self.bot_personality_notes else ""
-        return (
+        grounding = (
             f"You are {self.bot_identity_name}, an internal assistant for {self.bot_scope_name}. "
             f"Voice style: {self.bot_voice_style}. "
             "Answer the user's business question using the supplied FastAPI evidence as the source of truth. "
@@ -157,27 +166,42 @@ class ConnectBotOrchestrator:
             "follow-up references (like 'and yesterday?'), but answer strictly from the "
             "FastAPI evidence in the latest message. "
             "You may add short, clearly-labeled best-practice guidance from general knowledge only when it does not conflict with the evidence. "
-            "\n\nOutput rules — follow strictly:\n"
-            "- Reply with the final answer ONLY. Never show your reasoning, working notes, "
-            "planning, or phrases like 'We need to answer' or 'Let's extract'. No preamble.\n"
-            "- Format for Slack mrkdwn: *single asterisks* for bold, plain `•` or `-` bullets. "
-            "No markdown tables, no # headings, no **double asterisks**.\n"
-            "- Tone: answer like a knowledgeable coworker in chat. For status questions "
-            "('how's X today?'), reply with 1-2 short conversational sentences that lead with "
-            "the headline numbers — e.g. \"We're about 70% to today's goal at 257,800 studs, "
-            'running 12% of planned rate." No bullets for these.\n'
-            "- Keep it tight: headline numbers only, not every stat in the evidence. The user "
-            "sees the conversation history and will ask a follow-up if they want more detail.\n"
-            "- Use short bullet lists ONLY when the user explicitly asks for a breakdown, list, "
-            "or comparison across many items — and even then keep it under about 12 lines.\n"
-            "- Pick the numbers that answer the question — do not dump every row or every field. "
-            "When there are many rows, summarize the group and call out the best, worst, and any outliers.\n"
-            "- Round numbers sensibly (whole percents, thousands with commas, dollars like $39,800) "
-            "and use human labels, not raw field names like vs_plan_pct.\n"
-            "- When the evidence includes a trend percent vs a previous day, phrase it naturally "
-            "(e.g. 'up 12% from yesterday' or 'down 13% from yesterday')."
-            f"{notes}"
         )
+        if spec:
+            rules = (
+                "\n\nOutput rules — follow strictly:\n"
+                "- Never show your reasoning, working notes, or planning. No preamble.\n"
+                "- The headline answers the question like a knowledgeable coworker in chat, leading "
+                "with the headline number — e.g. \"We're about 70% to today's goal at 257,800 studs\".\n"
+                "- Pick the numbers that answer the question — not every field. For many rows, "
+                "show a table and call out the best, worst, and any outliers in the headline or body.\n"
+                "- Round numbers in text sensibly (whole percents, thousands with commas, dollars like "
+                "$39,800) and use human labels, not raw field names like vs_plan_pct.\n\n"
+                f"{JSON_SCHEMA_PROMPT}"
+            )
+        else:
+            rules = (
+                "\n\nOutput rules — follow strictly:\n"
+                "- Reply with the final answer ONLY. Never show your reasoning, working notes, "
+                "planning, or phrases like 'We need to answer' or 'Let's extract'. No preamble.\n"
+                "- Format for Slack mrkdwn: *single asterisks* for bold, plain `•` or `-` bullets. "
+                "No markdown tables, no # headings, no **double asterisks**.\n"
+                "- Tone: answer like a knowledgeable coworker in chat. For status questions "
+                "('how's X today?'), reply with 1-2 short conversational sentences that lead with "
+                "the headline numbers — e.g. \"We're about 70% to today's goal at 257,800 studs, "
+                'running 12% of planned rate." No bullets for these.\n'
+                "- Keep it tight: headline numbers only, not every stat in the evidence. The user "
+                "sees the conversation history and will ask a follow-up if they want more detail.\n"
+                "- Use short bullet lists ONLY when the user explicitly asks for a breakdown, list, "
+                "or comparison across many items — and even then keep it under about 12 lines.\n"
+                "- Pick the numbers that answer the question — do not dump every row or every field. "
+                "When there are many rows, summarize the group and call out the best, worst, and any outliers.\n"
+                "- Round numbers sensibly (whole percents, thousands with commas, dollars like $39,800) "
+                "and use human labels, not raw field names like vs_plan_pct.\n"
+                "- When the evidence includes a trend percent vs a previous day, phrase it naturally "
+                "(e.g. 'up 12% from yesterday' or 'down 13% from yesterday')."
+            )
+        return grounding + rules + notes
 
     def _build_tool_router_prompt(self) -> str:
         return (
@@ -488,27 +512,42 @@ class ConnectBotOrchestrator:
                 "\nSales/quote data is not available to this user — answer from the "
                 "other data sources and say sales figures are restricted if asked for them."
             )
+        evidence: dict[str, Any] = {}
+        facts: list[Fact] = []
+
+        def call_tool(intent: dict[str, Any]) -> dict[str, Any] | None:
+            data = self._call_api(intent)
+            if data is None:
+                return None
+            tool_facts = self._gather_facts(str(intent.get("endpoint")), intent.get("parameters") or {}, data)
+            if not tool_facts:
+                return data
+            facts.extend(tool_facts)
+            return {**data, "computed_facts": [{"id": f.id, "text": f.text} for f in tool_facts]}
+
         try:
             answer, model, tools_used = run_tool_loop(
                 self.llm_client,
-                self._call_api,
+                call_tool,
                 self._trim_evidence,
                 system_prompt,
                 history,
                 user_query,
                 tools=tools,
+                evidence=evidence,
             )
         except Exception as error:
             logger.warning("Tool router failed, falling back to legacy routing: %s", error)
             return None
 
         endpoints = ", ".join(dict.fromkeys(item["tool"] for item in tools_used)) or None
+        text, blocks, spec_dev = self._render_answer(answer, evidence, facts=facts)
         dev_info = None
         if is_dev:
-            dev_info = {"decision_path": ["tool_router"], "tools_used": tools_used}
+            dev_info = {"decision_path": ["tool_router"], "tools_used": tools_used, **spec_dev}
         return OrchestratorResult(
-            text=answer,
-            blocks=self.formatter.format_grounded_answer(answer),
+            text=text,
+            blocks=blocks,
             mode="business-tool-router",
             endpoint=endpoints,
             model=model,
@@ -686,6 +725,11 @@ class ConnectBotOrchestrator:
 
         evidence_data = self._trim_evidence(endpoint, response_data)
         evidence_text = json.dumps(evidence_data, default=str, indent=2)
+        facts = self._gather_facts(endpoint, intent.get("parameters") or {}, response_data)
+        facts_text = ""
+        if facts:
+            facts_json = json.dumps([{"id": f.id, "text": f.text} for f in facts])
+            facts_text = f"\n\nComputed facts (cite by id in insights):\n{facts_json}"
         history = [message for message in list(self._history.get(conversation_id, []))[-4:] if message.get("content")]
         messages = [
             {"role": "system", "content": self.business_prompt},
@@ -697,6 +741,7 @@ class ConnectBotOrchestrator:
                     f"Mapped endpoint: {endpoint}\n"
                     f"Parameters: {json.dumps(intent.get('parameters', {}), default=str)}\n\n"
                     f"FastAPI evidence:\n{evidence_text}"
+                    f"{facts_text}"
                 ),
             },
         ]
@@ -731,25 +776,72 @@ class ConnectBotOrchestrator:
             if base_dev_info is not None:
                 base_dev_info["decision_path"].append("llm_failed_use_structured_fallback")
 
+        text, blocks, spec_dev = self._render_answer(
+            answer, {endpoint: response_data}, llm_ok=model is not None, facts=facts
+        )
         evidence_lines = build_evidence_lines(endpoint, response_data)
         self._remember_business_context(conversation_id, endpoint, intent, response_data)
         dev_info = None
         if is_dev:
             dev_info = {
                 **(base_dev_info or {}),
+                **spec_dev,
                 "fastapi_response": build_response_preview(response_data),
                 "fastapi_response_raw": response_data,
                 "evidence_lines": evidence_lines,
             }
             dev_info.setdefault("decision_path", []).append("return_business_grounded_result")
         return OrchestratorResult(
-            text=answer,
-            blocks=self.formatter.format_grounded_answer(answer),
+            text=text,
+            blocks=blocks,
             mode="business-grounded",
             endpoint=endpoint,
             model=model,
             dev_info=dev_info,
         )
+
+    def _render_answer(
+        self,
+        answer: str,
+        evidence: dict[str, Any],
+        llm_ok: bool = True,
+        facts: list[Fact] | None = None,
+    ) -> tuple[str, list, dict[str, Any]]:
+        """Render the LLM reply: an answer spec when it parses, else prose.
+
+        Returns (text, blocks, dev fields). The prose fallback is the
+        pre-spec output, so a model that ignores the JSON instruction still answers.
+        """
+        if not self.answer_spec_enabled:
+            return answer, self.formatter.format_grounded_answer(answer), {}
+        facts = facts or []
+        spec = parse_answer_spec(answer, evidence, {f.id for f in facts}) if llm_ok else None
+        if spec is None:
+            reason = "reply_not_a_spec" if llm_ok else "llm_failed"
+            logger.info("Answer spec fallback: %s", reason)
+            dev = {"answer_layout": "prose", "spec_fallback_reason": reason}
+            return answer, self.formatter.format_grounded_answer(answer), dev
+        text, blocks = render(spec, evidence, {f.id: f.severity for f in facts})
+        logger.info("Answer spec rendered: layout=%s", spec.layout)
+        return (
+            text,
+            blocks,
+            {"answer_layout": spec.layout, "answer_spec": asdict(spec), "facts": [asdict(f) for f in facts]},
+        )
+
+    def _gather_facts(self, endpoint: str, params: dict[str, Any], data: dict[str, Any]) -> list[Fact]:
+        """Computed facts for one endpoint's data, fetching its comparison
+        (prior workday, trailing average, backlog total) when it has one.
+        A failed comparison just means fewer facts; it never fails the answer."""
+        if not self.answer_spec_enabled:
+            return []
+        try:
+            comparison_request = comparison_intent(endpoint, params, data)
+            comparison = self._call_api(comparison_request) if comparison_request else None
+            return compute_facts(endpoint, data, comparison)
+        except Exception as error:
+            logger.warning("Computing facts for %s failed: %s", endpoint, error)
+            return []
 
     @staticmethod
     def _trim_evidence(endpoint: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -924,7 +1016,10 @@ class ConnectBotOrchestrator:
                     "field_notes": (
                         "All values are dollars unless named *_orders. "
                         "quotes_trend_pct / sales_trend_pct are percent CHANGE vs the "
-                        "previous business day (negative = lower than yesterday)."
+                        "previous business day (negative = lower than yesterday). "
+                        "While data_date is today the day is still in progress, so the "
+                        "trend pct compares a partial day with a full one — don't quote it "
+                        "for today; compare against the computed facts' averages instead."
                     ),
                 }
             return None

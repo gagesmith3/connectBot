@@ -13,8 +13,8 @@ BACKLOG_ONLY = [t for t in TOOL_DEFS if t["function"]["name"] == "backlog"]
 
 
 class Recorder:
-    def __init__(self, data: dict[str, Any] | None = None):
-        self.data = data if data is not None else {"ok": True}
+    def __init__(self, data: dict[str, Any] | None = {"ok": True}):  # noqa: B006 - never mutated
+        self.data = data
         self.intents: list[dict[str, Any]] = []
 
     def __call__(self, intent: dict[str, Any]) -> dict[str, Any] | None:
@@ -77,14 +77,6 @@ def test_bad_json_arguments_become_empty_dict() -> None:
     assert api.intents == [{"endpoint": "backlog", "parameters": {}}]
 
 
-def test_at_most_four_tool_calls_run_per_round() -> None:
-    calls = [tool_call("backlog", {}, call_id=f"c{i}") for i in range(6)]
-    llm = FakeLLM(tool_replies=[{"content": "", "tool_calls": calls}, {"content": "done"}])
-    api = Recorder()
-    _run(llm, api)
-    assert len(api.intents) == 4
-
-
 def test_last_round_forces_text_and_cap_raises() -> None:
     looping = {"content": "", "tool_calls": [tool_call("backlog", {})]}
     llm = FakeLLM(tool_replies=[looping, looping])
@@ -98,3 +90,48 @@ def test_last_round_forces_text_and_cap_raises() -> None:
 def test_empty_reply_raises() -> None:
     with pytest.raises(RuntimeError, match="neither content nor tool calls"):
         _run(FakeLLM(tool_replies=[{"content": "  "}]), Recorder())
+
+
+def test_evidence_collects_each_successful_tool_result_by_name() -> None:
+    llm = FakeLLM(
+        tool_replies=[
+            {
+                "content": "",
+                "tool_calls": [
+                    tool_call("heading", {"head_name": "National 1"}, "c1"),
+                    tool_call("heading", {"head_name": "National 2"}, "c2"),
+                    tool_call("backlog", {}, "c3"),
+                ],
+            },
+            {"content": "done"},
+        ]
+    )
+    evidence: dict[str, Any] = {}
+
+    _run(llm, Recorder({"rows": []}), evidence=evidence)
+
+    assert list(evidence) == ["heading", "heading#2", "backlog"]
+
+
+def test_evidence_skips_tools_that_returned_nothing() -> None:
+    llm = FakeLLM(tool_replies=[{"content": "", "tool_calls": [tool_call("backlog", {})]}, {"content": "none"}])
+    evidence: dict[str, Any] = {}
+    _run(llm, Recorder(None), evidence=evidence)
+    assert evidence == {}
+
+
+def test_every_requested_call_gets_a_tool_response() -> None:
+    # The API 400s ("No tool output found for function call ...") if any call id
+    # in the assistant message goes unanswered, so calls past the cap are
+    # answered with a "skipped" result rather than dropped.
+    calls = [tool_call("heading", {"head_name": f"H{i}"}, f"c{i}") for i in range(10)]
+    llm = FakeLLM(tool_replies=[{"content": "", "tool_calls": calls}, {"content": "done"}])
+    api = Recorder({"rows": []})
+
+    _run(llm, api)
+
+    answered = [m["tool_call_id"] for m in llm.tool_calls[1]["messages"] if m["role"] == "tool"]
+    assert answered == [f"c{i}" for i in range(10)]
+    assert len(api.intents) == 8
+    skipped = [m for m in llm.tool_calls[1]["messages"] if m["role"] == "tool" and "skipped" in m["content"]]
+    assert len(skipped) == 2

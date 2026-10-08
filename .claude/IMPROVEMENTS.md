@@ -27,6 +27,16 @@ Fine while the router is up; they misroute if it's down or under Ollama:
 - "how much 0.212 stainless steel do we have?": no inventory word
 Add rules (and flip the test rows) only where the phrasing is unambiguous.
 
+The opposite also happens: a rule wins when it shouldn't. "which machine build parts
+are below minimum" hits the `equipment_builds` keyword rule ("build") instead of
+`equipment_parts`, and the answer then presents owed build items as low parts.
+The `equipment_parts` rule needs to come first when "parts" + "below/low/minimum/reorder" appear.
+
+"Which heads are behind plan today" makes the router call `heading` once per head
+instead of once with no `head_name`. It works now (the 400 that caused was fixed), but it's
+slow and the answer's table can only use the first call. Fix the `heading` tool
+description: "omit head_name for all heads".
+
 ## 4. Legacy IntentParser: substring small-talk bug, and retire-or-keep
 `IntentParser._local_first_parse` treats any query containing a small-talk keyword
 as a *substring* as small talk, so "hi" matches "mac**hi**nes" and "t**hi**s".
@@ -46,12 +56,7 @@ the last N turns per conversation (SQLite or a JSON file under `logs/`) with a T
 offline for long. Consider exposing a "last Slack event / connected" field on
 `/internal/health` for the Node ops dashboard.
 
-## 7. Free-model fallback churn
-~100 warnings from `:free` OpenRouter models failing (rate limits). Now that
-`gpt-oss-120b` is paid and primary, review whether the free fallbacks still help
-or just add latency before failure.
-
-## 8. Connect Core API as a second read source (decision recorded, not built)
+## 7. Connect Core API as a second read source (decision recorded, not built)
 The Core API (`E:\laragon\www`, `:9090`) has live data, but also 83 write routes
 behind a PIN-grade session. See CLAUDE.md "Data sources". Adopt it only once **all** of these hold:
 1. a dedicated bot service account whose RBAC role holds **read permissions only**,
@@ -62,7 +67,19 @@ behind a PIN-grade session. See CLAUDE.md "Data sources". Adopt it only once **a
    trends/totals → FastAPI), so one answer never mixes two different points in time;
 4. a stronger credential than the default PIN for that account (or an API-key route).
 
+## 8. Structured answers: known gaps
+- When the router calls the same tool twice, the second result is `heading#2` in the
+  evidence. The LLM can't name it, so its KPIs and tables can only come from the first call.
+- Insights are limited to what `insights.py` computes. Backlog week-over-week needs
+  connectCompute to keep snapshot history first.
+
 ## Ideas (not yet scoped)
+- Charts for time-series questions (sales trend, heading WTD): matplotlib PNG rendered in-process
+  and uploaded with `files_upload_v2`. Needs the `files:write` scope and an app reinstall.
+- Follow-up buttons under answers ("by customer", "yesterday"). Needs Slack interactivity
+  enabled and an `app.action` handler that re-runs the query in the thread.
+- Clarifying-choice UI (buttons or a menu) when a question is ambiguous, instead of guessing.
+- Swap the monospace table for Slack's native `table` block once it's confirmed for bot messages.
 - Scheduled morning rundown posted to a channel (tool-router rundown + cron in the Node backend).
 - Proactive alerts: wire shortage or failing compute job → post via the bridge.
 - Slash command (`/connect backlog`) for quick lookups without the LLM.

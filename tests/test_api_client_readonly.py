@@ -13,6 +13,7 @@ import inspect
 import httpx
 
 from src.connectbot.api_client import FastAPIClient
+from tests.conftest import FakeFastAPIServer
 
 
 def _getter_names() -> list[str]:
@@ -51,3 +52,19 @@ def test_client_has_no_write_helpers() -> None:
         if writes & set(name.lower().strip("_").split("_"))
     ]
     assert offending == []
+
+
+def test_blank_filters_are_not_sent(fake_api: FakeFastAPIServer) -> None:
+    # gpt-6-luna fills every optional filter with "" — sending stud_size= filters to zero rows.
+    fake_api.routes["/v1/metrics/backlog/breakdown"] = {"rows": []}
+    fake_api.routes["/v1/metrics/backlog/lots"] = {"rows": []}
+    client = fake_api.client()
+    filters = {"stud_size": "", "stud_material": "  ", "req_customer": "ACME"}
+
+    client.get_backlog_breakdown("stud_size", filters=filters)
+    client.get_backlog_lots(filters=filters)
+
+    for request in fake_api.requests:
+        assert "stud_size" not in request.url.params
+        assert "stud_material" not in request.url.params
+        assert request.url.params["req_customer"] == "ACME"

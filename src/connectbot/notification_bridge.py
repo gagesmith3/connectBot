@@ -20,8 +20,19 @@ logger = logging.getLogger(__name__)
 
 
 class NotificationRequest(BaseModel):
+    """`channel`, `thread_ts` and `reply_broadcast` are for a reply to a message the bridge posted earlier."""
+
     webhook_key: str = Field(default="default")
     payload: dict[str, Any] = Field(default_factory=dict)
+    channel: str | None = None
+    thread_ts: str | None = None
+    reply_broadcast: bool = False
+
+
+class UpdateRequest(NotificationRequest):
+    """Edit a message the bridge posted earlier. `channel` is the ID returned by the post."""
+
+    ts: str
 
 
 def _post_message(
@@ -30,6 +41,8 @@ def _post_message(
     text: str,
     blocks: list[dict[str, Any]] | None = None,
     attachments: list[dict[str, Any]] | None = None,
+    thread_ts: str | None = None,
+    reply_broadcast: bool = False,
 ) -> SlackResponse:
     message_args: dict[str, Any] = {
         "channel": channel,
@@ -40,6 +53,11 @@ def _post_message(
         message_args["blocks"] = blocks
     if attachments:
         message_args["attachments"] = attachments
+    if thread_ts:
+        message_args["thread_ts"] = thread_ts
+        # Slack only honours a broadcast on a reply; on a top-level post it is noise.
+        if reply_broadcast:
+            message_args["reply_broadcast"] = True
 
     return slack_client.chat_postMessage(**message_args)
 
@@ -210,7 +228,7 @@ def create_notification_app(
         if x_connectbot_token != settings.internal_api_token:
             raise HTTPException(status_code=401, detail="Invalid ConnectBot bridge token")
 
-        channel = _resolve_channel(settings, request.webhook_key)
+        channel = request.channel or _resolve_channel(settings, request.webhook_key)
         if not channel:
             raise HTTPException(
                 status_code=500,
@@ -223,7 +241,15 @@ def create_notification_app(
         attachments = payload.get("attachments") if isinstance(payload.get("attachments"), list) else None
 
         try:
-            response = _post_message(slack_client, channel, text, blocks=blocks, attachments=attachments)
+            response = _post_message(
+                slack_client,
+                channel,
+                text,
+                blocks=blocks,
+                attachments=attachments,
+                thread_ts=request.thread_ts,
+                reply_broadcast=request.reply_broadcast,
+            )
         except SlackApiError as error:
             detail = error.response.get("error", str(error)) if error.response else str(error)
             logger.error("Slack bridge post failed for key %s: %s", request.webhook_key, detail)
@@ -234,9 +260,54 @@ def create_notification_app(
 
         return {
             "ok": bool(response.get("ok")),
-            "channel": channel,
+            # The ID Slack resolved, not the configured name: chat.update needs it.
+            "channel": response.get("channel") or channel,
             "ts": response.get("ts"),
         }
+
+    @app.post("/internal/slack/update")
+    async def update_internal_notification(
+        request: UpdateRequest,
+        x_connectbot_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        if not settings.notification_server_enabled:
+            raise HTTPException(status_code=503, detail="Notification bridge is disabled")
+
+        if not settings.internal_api_token:
+            raise HTTPException(status_code=503, detail="Notification bridge token is not configured")
+
+        if x_connectbot_token != settings.internal_api_token:
+            raise HTTPException(status_code=401, detail="Invalid ConnectBot bridge token")
+
+        channel = request.channel or _resolve_channel(settings, request.webhook_key)
+        if not channel:
+            raise HTTPException(
+                status_code=500,
+                detail=f"No Slack channel configured for webhook_key '{request.webhook_key or 'default'}'",
+            )
+
+        payload = request.payload or {}
+        update_args: dict[str, Any] = {
+            "channel": channel,
+            "ts": request.ts,
+            "text": str(payload.get("text") or "Notification from IWT"),
+        }
+        if isinstance(payload.get("blocks"), list):
+            update_args["blocks"] = payload["blocks"]
+        if isinstance(payload.get("attachments"), list):
+            update_args["attachments"] = payload["attachments"]
+
+        try:
+            response = slack_client.chat_update(**update_args)
+        except SlackApiError as error:
+            detail = error.response.get("error", str(error)) if error.response else str(error)
+            logger.error("Slack bridge update failed for key %s: %s", request.webhook_key, detail)
+            raise HTTPException(status_code=502, detail=f"Slack API error: {detail}") from error
+        except Exception as error:  # pragma: no cover
+            logger.error("Unexpected Slack bridge update error for key %s: %s", request.webhook_key, error)
+            raise HTTPException(status_code=502, detail=str(error)) from error
+
+        return {"ok": bool(response.get("ok")), "channel": channel, "ts": response.get("ts") or request.ts}
 
     @app.get("/webhooks/woocommerce")
     async def woocommerce_ready() -> dict[str, Any]:

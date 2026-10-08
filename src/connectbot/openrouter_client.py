@@ -16,13 +16,24 @@ _THINK_OPEN_RE = re.compile(r"^\s*<think(?:ing)?>.*", re.DOTALL | re.IGNORECASE)
 # gpt-oss (harmony format) sometimes leaks its channel marker glued to the
 # answer: "finalWe've produced..." / "assistantfinalSales are...".
 _FINAL_MARKER_RE = re.compile(r"^\s*(?:assistant)?final\s*(?=[A-Z0-9\"'*_•(\[-])")
+# It can also leak the whole analysis channel: "analysisWe need ...". Only the
+# text after a glued final marker is an answer.
+_ANALYSIS_OPEN_RE = re.compile(r"^\s*analysis(?=[A-Z])")
+_GLUED_FINAL_RE = re.compile(r"(?:assistant)?final(?=[A-Z0-9\"'*_•(\[-])")
+# glm (and others) can write tool calls into the content as markup instead of
+# real tool_calls: "<tool_call>heading<arg_key>…</tool_call>". Never an answer.
+_TOOL_CALL_MARKUP_RE = re.compile(r"<tool_call>.*?(?:</tool_call>|$)", re.DOTALL)
 
 
 def _strip_reasoning(content: str) -> str:
-    cleaned = _THINK_BLOCK_RE.sub("", content)
+    cleaned = _TOOL_CALL_MARKUP_RE.sub("", _THINK_BLOCK_RE.sub("", content))
     if _THINK_OPEN_RE.match(cleaned):
         # Unterminated think block with no answer after it — nothing usable.
         return ""
+    if _ANALYSIS_OPEN_RE.match(cleaned):
+        finals = list(_GLUED_FINAL_RE.finditer(cleaned))
+        # No final answer after the leaked reasoning — nothing usable.
+        return cleaned[finals[-1].end() :].strip() if finals else ""
     cleaned = _FINAL_MARKER_RE.sub("", cleaned)
     return cleaned.strip()
 

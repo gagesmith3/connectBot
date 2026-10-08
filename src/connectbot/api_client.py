@@ -115,6 +115,18 @@ class FastAPIClient:
         "stud_id",
     )
 
+    @classmethod
+    def _lot_filters(cls, filters: dict[str, Any] | None) -> dict[str, Any]:
+        """Known lot filters with a real value. LLM tool calls often fill every
+        optional filter with "", and stud_size= would match no rows."""
+        picked: dict[str, Any] = {}
+        for key in cls._LOT_FILTER_KEYS:
+            value = (filters or {}).get(key)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue
+            picked[key] = value
+        return picked
+
     def get_backlog(self) -> dict[str, Any] | None:
         """Get latest backlog snapshot"""
         return self._request_json("/v1/metrics/backlog")
@@ -127,10 +139,7 @@ class FastAPIClient:
     ) -> dict[str, Any] | None:
         """Get open backlog grouped by a stud/request dimension (size, material, customer, ...)."""
         params: dict[str, Any] = {"group_by": group_by, "limit": limit}
-        for key in self._LOT_FILTER_KEYS:
-            value = (filters or {}).get(key)
-            if value is not None:
-                params[key] = value
+        params.update(self._lot_filters(filters))
         return self._request_json("/v1/metrics/backlog/breakdown", params=params)
 
     def get_backlog_lots(
@@ -140,10 +149,7 @@ class FastAPIClient:
     ) -> dict[str, Any] | None:
         """Get per-lot open backlog rows with stud dimensions, optionally filtered."""
         params: dict[str, Any] = {"limit": limit}
-        for key in self._LOT_FILTER_KEYS:
-            value = (filters or {}).get(key)
-            if value is not None:
-                params[key] = value
+        params.update(self._lot_filters(filters))
         return self._request_json("/v1/metrics/backlog/lots", params=params)
 
     def get_health(self) -> dict[str, Any] | None:

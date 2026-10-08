@@ -40,12 +40,22 @@ trace prefixes) → `ConnectBotOrchestrator.process_query`:
    - `keyword_router.resolve_keyword_intent` (deterministic regex rules; **order matters**:
      equipment before sales, retired topics before backlog/heading)
    - `_resolve_followup_intent` (reuses last endpoint, e.g. "and yesterday?")
-   - tool router (`tool_router.py`: LLM picks ≤4 tools/round, ≤3 rounds)
+   - tool router (`tool_router.py`: LLM picks ≤8 tools/round, ≤3 rounds). **Every
+     requested call id must get a tool message**; calls past the cap are answered
+     "skipped". An unanswered id makes OpenAI/Azure 400 the next request.
    - legacy `IntentParser.parse` as the final fallback
 3. Sales gate (`SALES_ACCESS_USERS`) applies to `sales`/`sage_trend` on every path.
-4. `_call_api` → `FastAPIClient` → `/v1/metrics/*`. Evidence goes through
-   `evidence.trim_evidence` (≤80 rows) to the LLM for a short Slack-mrkdwn answer.
-   `livewire_demand` is formatted deterministically, with no LLM.
+4. `_call_api` → `FastAPIClient` → `/v1/metrics/*`. `_gather_facts` adds computed
+   facts (`insights.py`), fetching one comparison where the endpoint has one: prior
+   workday for heading, a 20-day sales series, the backlog total for an unfiltered breakdown.
+   Evidence (`evidence.trim_evidence`, ≤80 rows) plus facts go to the LLM.
+5. **Structured answers** (`ANSWER_SPEC_ENABLED`, default on). The LLM replies with a
+   JSON answer spec (`answer_spec.py`): layout `quick | table | rundown | prose`, headline,
+   and the *field names* for KPIs and tables, plus up to 2 insights citing fact ids.
+   `parse_answer_spec` drops refs that don't resolve against the evidence and insights
+   whose id wasn't computed. `answer_renderer.render` then reads every KPI and table value
+   from the evidence. A reply that isn't a spec renders as prose (`spec_fallback_reason`
+   in `[DEV]`). `livewire_demand` is formatted deterministically, with no LLM.
 
 LLM: OpenRouter (`openrouter_client.py`, ordered model fallback, tool calling)
 or Ollama (`ollama_client.py`, no tool calling, so the tool router switches itself off).
@@ -59,6 +69,9 @@ or Ollama (`ollama_client.py`, no tool calling, so the tool router switches itse
 | `keyword_router.py` | term tables, date parsing (`_extract_data_date`), `resolve_keyword_intent` |
 | `tool_router.py` | `TOOL_DEFS` + `run_tool_loop` (LLM tool calling) |
 | `evidence.py` | `trim_evidence`, `[DEV]` request/response previews, evidence lines |
+| `answer_spec.py` | the JSON answer contract, `JSON_SCHEMA_PROMPT`, `parse_answer_spec` (validation) |
+| `answer_renderer.py` | spec + evidence → Slack blocks (KPI fields, phone-width tables, footer), `format_value` |
+| `insights.py` | computed facts per endpoint + `comparison_intent` (the extra fetch) |
 | `api_client.py` | `FastAPIClient`, GET-only, retries |
 | `response_formatter.py` | `API_CATALOG`, `capability_summary()`, Slack blocks |
 | `intent_parser.py` | legacy LLM/keyword parser (last fallback; only router under Ollama) |
@@ -97,14 +110,18 @@ a different direction.)
   reply instead of a doomed API call. Remove a topic once its endpoint returns.
 - Never execute a tool the model wasn't offered (access control lives in the
   offered tool list).
-- Slack output: `*single asterisks*`, no markdown tables/headings, sections
-  ≤2900 chars (`_split_sections`).
+- Slack output: the LLM never formats tables or types KPI/table numbers. It names
+  fields in the answer spec and `answer_renderer` fills in the values. Text fields use
+  `*single asterisks*` with no markdown tables or headings, sections stay ≤2900 chars
+  (`_split_sections`), and tables are monospace and ≤44 chars wide so they fit a phone.
+- Insights only restate computed facts. A new trend or comparison goes into
+  `insights.py` with a test; never ask the LLM to work one out.
 - Never commit `.env`. It holds the Slack, OpenRouter, FastAPI, and WooCommerce secrets.
 
 ## Testing a change
 
 ```sh
-venv\Scripts\python.exe -m pytest      # ~150 tests, no network, ~1s
+venv\Scripts\python.exe -m pytest      # no network, ~1s
 venv\Scripts\ruff.exe check .  &&  venv\Scripts\ruff.exe format --check .
 venv\Scripts\mypy.exe                  # src/connectbot + main.py
 ```

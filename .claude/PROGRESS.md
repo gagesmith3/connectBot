@@ -5,6 +5,54 @@ why if it isn't obvious. Entries before 2026-10-07 were rebuilt from file
 timestamps and the log, because the project had no git history. Their dates are
 when the file was **last touched**, not necessarily when each feature landed.
 
+## 2026-10-07: fix: `<tool_call>` markup posted to Slack
+- Cause: when the model asked for more than 4 tools in one round, `run_tool_loop` ran 4
+  and dropped the rest. Their call ids had no tool response, so OpenAI/Azure rejected the
+  next request with 400 "No tool output found for function call …". The fallback
+  glm-5.3-flash then wrote its tool calls as `<tool_call>…` text, which went out as the answer.
+- Every call id now gets a response. The cap is 8 per round, and calls past it are
+  answered "skipped, call again". `_strip_reasoning` drops `<tool_call>` markup, so a
+  markup-only reply falls through to the next model.
+- Checked live: 10 calls in one round → gpt-6-luna accepted the history, re-called the 2
+  skipped tools, and answered.
+
+## 2026-10-07: structured answers (answer spec + renderer + computed insights)
+Design: `docs/superpowers/specs/2026-10-07-structured-answers-design.md`.
+- Business answers are now a JSON **answer spec** (`answer_spec.py`) with layout
+  `quick` (headline + KPI fields), `table` (monospace, phone width), `rundown` (one section
+  per topic), or `prose`. The LLM names fields; `answer_renderer.py` reads the values from
+  the evidence, so table and KPI numbers are never retyped by the model. Every answer gets a
+  freshness footer ("backlog · as of Oct 7, 2:45 PM").
+- **Computed insights** (`insights.py`): pace vs shift, projection, uptime, vs prior workday
+  (heading); sales/quotes vs a 20-business-day average; backlog bottleneck/overdue and a
+  breakdown's share of the total; parts below minimum; oldest open repair; wire shortages.
+  The LLM may phrase up to 2 of them, cited by id; uncited ids are dropped. Warnings get ⚠.
+- Applies to the single-endpoint path and the tool router. A non-JSON reply renders as
+  prose, exactly as before. Kill switch: `ANSWER_SPEC_ENABLED=false`, which also skips the
+  comparison fetches.
+- Sales evidence now says that `*_trend_pct` for today compares a partial day with a full one.
+  The bot had been reporting "sales down 88% vs yesterday" mid-afternoon.
+- Fixed: the API client sent blank lot filters (`stud_size=`). gpt-6-luna fills every
+  optional filter with "", so "backlog by stud size" returned no rows.
+- Checked live in-process (gpt-6-luna, live FastAPI): heading, follow-up, breakdown table,
+  rundown, sales, backlog, repairs. All returned valid specs with no prose fallback; wire
+  demand is unchanged.
+- 223 tests (was 188).
+
+## 2026-10-07: OpenRouter model chain replaced
+- `OPENROUTER_MODELS` = `openai/gpt-6-luna, z-ai/glm-5.3-flash, openai/gpt-oss-120b,
+  nvidia/nemotron-3-super-120b-a12b:free` (`.env` and `.env.example`).
+- Chosen by a one-off benchmark of 20 models, using the real router prompt and `TOOL_DEFS`
+  (17 routing questions, 4 answer scenarios on synthetic data, 2 trials each):
+  - gpt-6-luna scored 94% on routing and 100% on answers, with p90 latency of 1.9s.
+  - gpt-oss-120b scored 84% on routing. It replied "no data" for "how did National 2 do
+    yesterday" without calling a tool, and once leaked its `analysis…` reasoning channel.
+- Removed four free models: `llama-3.3-70b-instruct:free` and `gpt-oss-20b:free` are gone
+  from OpenRouter (404), and `gemma-4-31b/26b:free` were rate-limited on every call.
+- `_strip_reasoning` now handles a leaked harmony `analysis` channel. It keeps the text
+  after a glued final marker, or returns empty so the next model in the chain answers.
+- Checked live in-process: rundown, National 2 yesterday plus a follow-up, and small talk.
+
 ## 2026-10-07: safety net + modernization
 Baseline before this work: `cdfff30`.
 - **Tests**: 148 pytest tests, no network, ~1s. They cover the routing table (seeded from

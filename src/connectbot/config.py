@@ -41,6 +41,7 @@ class BotSettings:
         bot_personality_notes: str = "",
         social_deterministic_mode: bool = True,
         use_tool_router: bool = True,
+        answer_spec_enabled: bool = True,
         sales_access_users: set[str] | None = None,
         llm_timeout_seconds: float = 20.0,
         local_only_fail_closed: bool = False,
@@ -82,6 +83,7 @@ class BotSettings:
         self.bot_personality_notes = bot_personality_notes
         self.social_deterministic_mode = social_deterministic_mode
         self.use_tool_router = use_tool_router
+        self.answer_spec_enabled = answer_spec_enabled
         self.sales_access_users = sales_access_users or set()
         self.llm_timeout_seconds = llm_timeout_seconds
         self.local_only_fail_closed = local_only_fail_closed
@@ -162,6 +164,7 @@ class BotSettings:
         bot_personality_notes = os.getenv("BOT_PERSONALITY_NOTES", "").strip()
         social_deterministic_mode = os.getenv("SOCIAL_DETERMINISTIC_MODE", "true").lower() == "true"
         use_tool_router = os.getenv("USE_TOOL_ROUTER", "true").lower() == "true"
+        answer_spec_enabled = os.getenv("ANSWER_SPEC_ENABLED", "true").lower() == "true"
         sales_access_users = {user.strip() for user in os.getenv("SALES_ACCESS_USERS", "").split(",") if user.strip()}
         llm_timeout_seconds = float(os.getenv("LLM_TIMEOUT_SECONDS", "20"))
         local_only_fail_closed = os.getenv("LOCAL_ONLY_FAIL_CLOSED", "false").lower() == "true"
@@ -207,6 +210,7 @@ class BotSettings:
             bot_personality_notes=bot_personality_notes,
             social_deterministic_mode=social_deterministic_mode,
             use_tool_router=use_tool_router,
+            answer_spec_enabled=answer_spec_enabled,
             sales_access_users=sales_access_users,
             llm_timeout_seconds=llm_timeout_seconds,
             local_only_fail_closed=local_only_fail_closed,

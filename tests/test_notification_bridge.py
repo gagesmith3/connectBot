@@ -23,6 +23,7 @@ CHANNELS = {"default": "#all", "heading": "#heading", "marketplace": "#marketpla
 class FakeSlack:
     def __init__(self, error: str | None = None):
         self.posts: list[dict[str, Any]] = []
+        self.updates: list[dict[str, Any]] = []
         self.error = error
 
     def chat_postMessage(self, **kwargs: Any) -> dict[str, Any]:
@@ -30,6 +31,12 @@ class FakeSlack:
             raise SlackApiError("boom", {"error": self.error})
         self.posts.append(kwargs)
         return {"ok": True, "ts": "123.456"}
+
+    def chat_update(self, **kwargs: Any) -> dict[str, Any]:
+        if self.error:
+            raise SlackApiError("boom", {"error": self.error})
+        self.updates.append(kwargs)
+        return {"ok": True, "ts": kwargs["ts"]}
 
 
 def _client(slack: FakeSlack | None = None, **overrides: Any) -> tuple[TestClient, FakeSlack]:
@@ -74,6 +81,40 @@ def test_notify_posts_to_the_keyed_channel() -> None:
     assert response.status_code == 200
     assert response.json() == {"ok": True, "channel": "#heading", "ts": "123.456"}
     assert slack.posts == [{"channel": "#heading", "text": "hello"}]
+
+
+def _update(client: TestClient, **body: Any) -> Any:
+    return client.post(
+        "/internal/slack/update",
+        json={"webhook_key": "heading", "ts": "123.456", "payload": {"text": "back", "blocks": []}, **body},
+        headers={"X-ConnectBot-Token": TOKEN},
+    )
+
+
+def test_update_edits_the_message_in_the_given_channel() -> None:
+    client, slack = _client()
+    response = _update(client, channel="C0AE953KV25")
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "channel": "C0AE953KV25", "ts": "123.456"}
+    assert slack.updates == [{"channel": "C0AE953KV25", "ts": "123.456", "text": "back", "blocks": []}]
+
+
+def test_update_falls_back_to_the_keyed_channel() -> None:
+    client, slack = _client()
+    assert _update(client).status_code == 200
+    assert slack.updates[0]["channel"] == "#heading"
+
+
+def test_update_needs_the_token() -> None:
+    client, slack = _client()
+    response = client.post("/internal/slack/update", json={"ts": "1.2", "payload": {}})
+    assert response.status_code == 401
+    assert slack.updates == []
+
+
+def test_update_slack_error_is_502() -> None:
+    client, _ = _client(FakeSlack(error="message_not_found"))
+    assert _update(client).status_code == 502
 
 
 def test_unknown_key_falls_back_to_default_channel() -> None:
@@ -154,3 +195,39 @@ def test_signed_invalid_json_is_400() -> None:
     client, _ = _client()
     body = b"{not json"
     assert _wc_post(client, body, _wc_sign(body)).status_code == 400
+
+
+def test_notify_posts_a_threaded_reply_in_the_given_channel() -> None:
+    client, slack = _client()
+    response = client.post(
+        "/internal/slack/notify",
+        json={
+            "webhook_key": "heading",
+            "channel": "C0AE953KV25",
+            "thread_ts": "123.456",
+            "reply_broadcast": True,
+            "payload": {"text": "still offline"},
+        },
+        headers={"X-ConnectBot-Token": TOKEN},
+    )
+    assert response.status_code == 200
+    assert slack.posts == [
+        {"channel": "C0AE953KV25", "text": "still offline", "thread_ts": "123.456", "reply_broadcast": True}
+    ]
+
+
+def test_notify_without_thread_fields_is_unchanged() -> None:
+    client, slack = _client()
+    _notify(client)
+    assert "thread_ts" not in slack.posts[0]
+    assert "reply_broadcast" not in slack.posts[0]
+
+
+def test_broadcast_without_a_thread_is_not_sent() -> None:
+    client, slack = _client()
+    client.post(
+        "/internal/slack/notify",
+        json={"webhook_key": "heading", "reply_broadcast": True, "payload": {"text": "x"}},
+        headers={"X-ConnectBot-Token": TOKEN},
+    )
+    assert "reply_broadcast" not in slack.posts[0]

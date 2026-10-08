@@ -387,7 +387,7 @@ TOOL_DEFS: list[dict[str, Any]] = [
     },
 ]
 
-_MAX_CALLS_PER_ROUND = 4
+_MAX_CALLS_PER_ROUND = 8
 
 
 def run_tool_loop(
@@ -399,6 +399,7 @@ def run_tool_loop(
     user_query: str,
     max_rounds: int = 3,
     tools: list[dict[str, Any]] | None = None,
+    evidence: dict[str, Any] | None = None,
 ) -> tuple[str, str | None, list[dict[str, Any]]]:
     """Drive tool-call rounds until the model produces a final answer.
 
@@ -406,6 +407,8 @@ def run_tool_loop(
     orchestrator falls back to the legacy single-endpoint path. `tools` lets
     the caller offer a restricted subset (e.g. per-user access control); only
     offered tools are ever executed, even if the model requests another name.
+    `evidence`, when given, receives each successful tool result keyed by
+    tool name ("heading", then "heading#2" for a repeat) for the answer renderer.
     """
     if tools is None:
         tools = TOOL_DEFS
@@ -437,9 +440,28 @@ def run_tool_loop(
                 "tool_calls": tool_calls,
             }
         )
-        for call in tool_calls[:_MAX_CALLS_PER_ROUND]:
+        # Every call id in the assistant message needs a tool response, or the
+        # next request 400s ("No tool output found for function call ...").
+        # Calls past the cap are answered as skipped instead of dropped.
+        for index, call in enumerate(tool_calls):
             function = call.get("function") or {}
             name = str(function.get("name") or "")
+            if index >= _MAX_CALLS_PER_ROUND:
+                logger.info("Tool router skipped %s: over %s calls this round", name, _MAX_CALLS_PER_ROUND)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": str(call.get("id") or ""),
+                        "name": name,
+                        "content": json.dumps(
+                            {
+                                "error": f"skipped: at most {_MAX_CALLS_PER_ROUND} tool calls per round. "
+                                "Call it again next round if you still need it."
+                            }
+                        ),
+                    }
+                )
+                continue
             try:
                 arguments = json.loads(function.get("arguments") or "{}")
             except json.JSONDecodeError:
@@ -457,6 +479,12 @@ def run_tool_loop(
                 )
             else:
                 result_text = json.dumps(trim_evidence(name, data), default=str)
+                if evidence is not None:
+                    key, n = name, 1
+                    while key in evidence:
+                        n += 1
+                        key = f"{name}#{n}"
+                    evidence[key] = data
             messages.append(
                 {
                     "role": "tool",

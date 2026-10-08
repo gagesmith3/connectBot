@@ -19,6 +19,7 @@ _ENV_KEYS = [
     "SLACK_NOTIFY_CHANNEL_DEFAULT",
     "SLACK_NOTIFY_CHANNEL_HEADING",
     "USE_TOOL_ROUTER",
+    "ANSWER_SPEC_ENABLED",
 ]
 
 
@@ -80,3 +81,12 @@ def test_only_configured_notify_channels_are_kept(clean_env: pytest.MonkeyPatch)
 
 def test_tool_router_defaults_on() -> None:
     assert BotSettings.from_env().use_tool_router is True
+
+
+def test_answer_spec_defaults_on() -> None:
+    assert BotSettings.from_env().answer_spec_enabled is True
+
+
+def test_answer_spec_kill_switch(clean_env: pytest.MonkeyPatch) -> None:
+    clean_env.setenv("ANSWER_SPEC_ENABLED", "false")
+    assert BotSettings.from_env().answer_spec_enabled is False
